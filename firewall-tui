@@ -1,0 +1,4 @@
+#!/bin/bash
+# Run the firewall TUI
+cd "$(dirname "$0")"
+exec ./venv/bin/python -m fwtui.app "$@"

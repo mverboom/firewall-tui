@@ -1,0 +1,379 @@
+"""Custom full-width rules view.
+
+Sections are rendered as full-width header bars (like an HTML table row with
+colspan), with the rules of each section as column rows underneath. This
+replaces the DataTable for the Rules tab because DataTable cannot span a cell
+across columns.
+
+Scrolling is handled manually (own scroll offset) to avoid fighting textual's
+virtual-size machinery inside the tabbed layout.
+
+Row model (list of tuples):
+    ("section", name)
+    ("implicit-section", name)
+    ("rule", line, section_name, cols_dict)
+    ("implicit", cols_dict)
+"""
+
+from __future__ import annotations
+
+from rich.text import Text
+from textual import events
+from textual.binding import Binding
+from textual.message import Message
+from textual.strip import Strip
+from textual.widget import Widget
+
+COLUMNS = ("table", "chain", "from", "sport", "to", "proto", "port",
+           "action", "target")
+# chain is 11 so "postrouting" (11 chars) is not truncated; every column is
+# joined with a space in the render so values never run together
+COL_WIDTHS = (7, 11, 22, 6, 22, 6, 12, 10, 20)
+
+SECTION_FG = "#a9b1d6"
+SECTION_BG = "#2a2f45"
+IMPLICIT_FG = "#565f89"
+IMPLICIT_BG = "#24283b"
+INCLUDE_FG = "#e0af68"   # amber, for [#include] bars
+INCLUDE_BG = "#2a2f45"
+
+
+def header_text() -> str:
+    """The column header line (for the Static above the view)."""
+    # joined with a space so columns always have a gap, even when a value
+    # exactly fills its column width (e.g. "postrouting" = 10 in a 10-wide col)
+    return " ".join(c.ljust(w) for c, w in zip(COLUMNS, COL_WIDTHS))
+
+
+class RulesView(Widget, can_focus=True):
+    """Full-width rules view with spanning section bars."""
+
+    BINDINGS = [
+        Binding("up", "move(-1)", "Up", show=False),
+        Binding("down", "move(1)", "Down", show=False),
+        Binding("pageup", "move(-10)", "Page up", show=False),
+        Binding("pagedown", "move(10)", "Page down", show=False),
+        Binding("home", "move(-100000)", "Top", show=False),
+        Binding("end", "move(100000)", "Bottom", show=False),
+        Binding("space", "toggle_collapse", "Collapse/expand", show=False),
+        Binding("c", "collapse_all", "Collapse all", show=False),
+        Binding("o", "expand_all", "Expand all", show=False),
+        Binding("enter", "activate", "Edit", show=False),
+        Binding("ctrl+up", "move_up", "Move up", show=False),
+        Binding("ctrl+down", "move_down", "Move down", show=False),
+        Binding("/", "search", "Filter", show=False),
+    ]
+
+    class SelectionChanged(Message):
+        """Posted when the selected row changes."""
+
+        def __init__(self, row_index: int) -> None:
+            super().__init__()
+            self.row_index = row_index
+
+    class Activate(Message):
+        """Posted when enter is pressed on a row (open the editor)."""
+
+        def __init__(self, row_index: int) -> None:
+            super().__init__()
+            self.row_index = row_index
+
+    class NavigateUp(Message):
+        """Posted when up is pressed at the very top (focus the menu)."""
+
+    class MoveRequest(Message):
+        """Posted when ctrl+up/down is pressed (reorder the selected row)."""
+
+        def __init__(self, direction: str) -> None:
+            super().__init__()
+            self.direction = direction
+
+    class SearchRequest(Message):
+        """Posted when / is pressed (open the filter prompt)."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.all_rows: list[tuple] = []   # full row list from set_rows
+        self.rows: list[tuple] = []       # visible rows (collapsed sections hidden)
+        self.collapsed: set[str] = set()  # section names that are collapsed
+        self._initialized = False
+        self.filter_text = ""
+        self.selected = 0
+        self.scroll = 0  # index of the first visible row
+
+    # -- data --------------------------------------------------------------
+    @staticmethod
+    def _key(row: tuple) -> str:
+        """Collapse key for a row: sections by name, includes prefixed."""
+        if row[0] == "include":
+            return "include:" + row[1]
+        return row[1]
+
+    def set_rows(self, rows: list[tuple], reset_collapsed: bool = False) -> None:
+        self.all_rows = rows
+        if reset_collapsed or not self._initialized:
+            # default: everything collapsed (like the db view)
+            self.collapsed = {self._key(r) for r in rows
+                              if r[0] in ("section", "implicit-section",
+                                          "include")}
+            self._initialized = True
+        valid = {self._key(r) for r in rows
+                 if r[0] in ("section", "implicit-section", "include")}
+        self.collapsed &= valid
+        self._rebuild_visible()
+        self.selected = 0
+        self.scroll = 0
+        self.refresh()
+        self.post_message(self.SelectionChanged(0))
+
+    def _rebuild_visible(self) -> None:
+        """Recompute visible rows; collapsed sections and include groups hide
+        their content. A stack tracks nested include groups by source file.
+        A filter hides non-matching rows (sections with matching rules stay)."""
+        self.rows = []
+        stack: list[tuple[str, bool]] = []  # (included file path, hidden)
+        section_hidden = False
+        matching = self._matching_sections()
+        for row in self.all_rows:
+            kind = row[0]
+            if kind == "include":
+                if row[2]:
+                    stack.append((row[2], self._key(row) in self.collapsed))
+                self.rows.append(row)
+                continue
+            if kind == "section":
+                # leave include groups whose content has ended
+                while stack and stack[-1][0] != row[2]:
+                    stack.pop()
+                group_hidden = any(h for _, h in stack)
+                filtered = (matching is not None
+                            and (row[1], row[2]) not in matching)
+                section_hidden = (row[1] in self.collapsed) or group_hidden \
+                    or filtered
+                self.rows.append(row)
+                continue
+            if kind == "implicit-section":
+                section_hidden = row[1] in self.collapsed
+                self.rows.append(row)
+                continue
+            if matching is not None and kind == "rule" \
+                    and not self._matches(row):
+                continue
+            if not section_hidden:
+                self.rows.append(row)
+        self.selected = min(self.selected, max(0, len(self.rows) - 1))
+        self._ensure_visible()
+
+    def expand_section(self, name: str) -> None:
+        """Expand a collapsed section (used when adding a rule to it), plus
+        any include group the section lives in."""
+        self.collapsed.discard(name)
+        for row in self.all_rows:
+            if row[0] == "section" and row[1] == name and row[2]:
+                src = row[2]
+                for inc in self.all_rows:
+                    if inc[0] == "include" and inc[2] == src:
+                        self.collapsed.discard("include:" + inc[1])
+                break
+        self._rebuild_visible()
+        self.refresh()
+
+    def action_toggle_collapse(self) -> None:
+        if not self.rows:
+            return
+        row = self.rows[self.selected]
+        if row[0] in ("section", "implicit-section", "include"):
+            key = self._key(row)
+            if key in self.collapsed:
+                self.collapsed.discard(key)
+            else:
+                self.collapsed.add(key)
+            self._rebuild_visible()
+            self.refresh()
+            self.post_message(self.SelectionChanged(self.selected))
+
+    def action_collapse_all(self) -> None:
+        self.collapsed = {self._key(r) for r in self.all_rows
+                          if r[0] in ("section", "implicit-section",
+                                      "include")}
+        self._rebuild_visible()
+        self.refresh()
+        self.post_message(self.SelectionChanged(self.selected))
+
+    def action_expand_all(self) -> None:
+        self.collapsed = set()
+        self._rebuild_visible()
+        self.refresh()
+        self.post_message(self.SelectionChanged(self.selected))
+
+    def action_activate(self) -> None:
+        """Enter: toggle collapse on a section/header, else open the editor."""
+        if not self.rows:
+            return
+        row = self.rows[self.selected]
+        if row[0] in ("section", "implicit-section", "include"):
+            self.action_toggle_collapse()
+        else:
+            self.post_message(self.Activate(self.selected))
+
+    def action_move_up(self) -> None:
+        if self.rows:
+            self.post_message(self.MoveRequest("up"))
+
+    def action_move_down(self) -> None:
+        if self.rows:
+            self.post_message(self.MoveRequest("down"))
+
+    def action_search(self) -> None:
+        self.post_message(self.SearchRequest())
+
+    def set_filter(self, text: str) -> None:
+        """Filter the view to rows matching text (case-insensitive)."""
+        self.filter_text = text.strip().lower()
+        self._rebuild_visible()
+        self.refresh()
+
+    def _matches(self, row: tuple) -> bool:
+        if not self.filter_text:
+            return True
+        if row[0] == "section":
+            return self.filter_text in row[1].lower()
+        if row[0] == "rule":
+            return (self.filter_text in row[1].value.lower()
+                    or self.filter_text in row[2].lower())
+        if row[0] == "include":
+            return self.filter_text in row[1].lower()
+        return True  # implicit rows always show (context)
+
+    def _matching_sections(self):
+        """Sections that match the filter or contain a matching rule."""
+        if not self.filter_text:
+            return None
+        result = set()
+        for row in self.all_rows:
+            if row[0] == "section" and self._matches(row):
+                result.add((row[1], row[2]))
+            if row[0] == "rule" and self._matches(row):
+                result.add((row[2], row[1].source))
+        return result
+
+    def select_line(self, line) -> bool:
+        """Select the row for a rule line after a repopulation."""
+        for i, row in enumerate(self.rows):
+            if row[0] == "rule" and row[1] is line:
+                self.selected = i
+                self._ensure_visible()
+                self.refresh()
+                self.post_message(self.SelectionChanged(i))
+                return True
+        return False
+
+    def select_section(self, name: str, source: str) -> bool:
+        """Select the row for a section after a repopulation."""
+        for i, row in enumerate(self.rows):
+            if row[0] == "section" and row[1] == name and row[2] == source:
+                self.selected = i
+                self._ensure_visible()
+                self.refresh()
+                self.post_message(self.SelectionChanged(i))
+                return True
+        return False
+
+    # -- navigation --------------------------------------------------------
+    def action_move(self, delta: int) -> None:
+        if not self.rows:
+            return
+        if delta < 0 and self.selected == 0 and self.scroll == 0:
+            self.post_message(self.NavigateUp())
+            return
+        self.selected = max(0, min(len(self.rows) - 1, self.selected + delta))
+        self._ensure_visible()
+        self.refresh()
+        self.post_message(self.SelectionChanged(self.selected))
+
+    def _ensure_visible(self) -> None:
+        """Keep the selected row within the visible area."""
+        height = max(1, self.size.height)
+        if self.selected < self.scroll:
+            self.scroll = self.selected
+        elif self.selected >= self.scroll + height:
+            self.scroll = self.selected - height + 1
+
+    def on_click(self, event: events.Click) -> None:
+        if self.rows:
+            self.selected = min(len(self.rows) - 1, event.y + self.scroll)
+            self._ensure_visible()
+            self.refresh()
+            self.post_message(self.SelectionChanged(self.selected))
+
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        if self.rows:
+            self.scroll = min(len(self.rows) - 1, self.scroll + 3)
+            self.refresh()
+
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        if self.rows:
+            self.scroll = max(0, self.scroll - 3)
+            self.refresh()
+
+    # -- rendering ---------------------------------------------------------
+    def render_line(self, y: int) -> Strip:
+        width = self.size.width
+        vy = y + self.scroll
+        if vy >= len(self.rows):
+            return Strip.blank(width, self.rich_style)
+        row = self.rows[vy]
+        kind = row[0]
+        selected = (vy == self.selected)
+        if kind == "include":
+            label = "include: " + row[1]
+            if not row[2]:
+                label += " (missing)"
+            return self._render_section(label, width, selected, False,
+                                        include=True, key=self._key(row))
+        if kind in ("section", "implicit-section"):
+            return self._render_section(row[1], width, selected,
+                                        kind == "implicit-section",
+                                        key=row[1])
+        # rule / implicit rows carry their column dict as the last element
+        return self._render_rule(row[-1], width, selected, kind == "implicit")
+
+    def _render_section(self, name: str, width: int, selected: bool,
+                        implicit: bool, include: bool = False,
+                        key: str = "") -> Strip:
+        if include:
+            fg = INCLUDE_FG
+            bg = INCLUDE_BG
+        elif implicit:
+            fg = IMPLICIT_FG
+            bg = IMPLICIT_BG
+        else:
+            fg = SECTION_FG
+            bg = SECTION_BG
+        style = f"{fg} on {bg}"
+        marker = "▾" if key not in self.collapsed else "▸"
+        text = Text(f" {marker} {name}", style=style)
+        if text.cell_len > width:
+            text = Text(text.plain[: max(0, width - 3)] + "...", style=style)
+        text.pad_right(max(0, width - text.cell_len))
+        if selected:
+            text.stylize("reverse")
+        segments = [s for s in self.app.console.render(text) if s.text != "\n"]
+        return Strip(segments, width)
+
+    def _render_rule(self, cols: dict, width: int, selected: bool,
+                     implicit: bool) -> Strip:
+        cells = []
+        for c, w in zip(COLUMNS, COL_WIDTHS):
+            val = str(cols.get(c, "any"))
+            cells.append(val[:w].ljust(w))
+        # join with a space so columns never run together
+        line = " ".join(cells)
+        text = Text(line)
+        text.stylize(self.rich_style)
+        if implicit:
+            text.stylize("dim")
+        if selected:
+            text.stylize("reverse")
+        segments = [s for s in self.app.console.render(text) if s.text != "\n"]
+        return Strip(segments, width)
