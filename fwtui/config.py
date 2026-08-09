@@ -17,6 +17,7 @@ import os
 
 DEFAULT_CONFIG = os.path.join(os.path.dirname(os.path.dirname(__file__)),
                               "firewall-tui.conf")
+HOME_CONFIG = os.path.expanduser("~/.firewall-tui.conf")
 
 DEFAULTS = {
     "dir": "/home/cdist/config/files/firewall",
@@ -35,12 +36,22 @@ DEFAULT_ENV = {
 }
 
 
+def _config_path(path: str | None) -> str:
+    """Resolve the config file: explicit path, else ~/.firewall-tui.conf if it
+    exists, else the project's firewall-tui.conf."""
+    if path:
+        return path
+    if os.path.exists(HOME_CONFIG):
+        return HOME_CONFIG
+    return DEFAULT_CONFIG
+
+
 def load_config(path: str | None = None) -> dict:
     """Load the config file, falling back to defaults for missing keys.
     Returns {"firewall": {...}, "env": {...}}."""
     cfg = configparser.ConfigParser()
     cfg.optionxform = str  # preserve env var case
-    cfg.read(path or DEFAULT_CONFIG)
+    cfg.read(_config_path(path))
     out = dict(DEFAULTS)
     if cfg.has_section("firewall"):
         for k in DEFAULTS:
