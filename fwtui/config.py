@@ -26,10 +26,20 @@ DEFAULTS = {
                       "-c /home/cdist/config {host}",
 }
 
+DEFAULT_ENV = {
+    "CDIST_BETA": "1",
+    "CDIST_INSTALL": "/home/cdist/cdist",
+    "CDIST_EXPLORE": "/home/cdist/explore",
+    "CDIST_INVENTORY": "/home/cdist/.cdist/inventory",
+    "CDIST_CONFIG_DIR": "/home/cdist/config",
+}
+
 
 def load_config(path: str | None = None) -> dict:
-    """Load the config file, falling back to defaults for missing keys."""
+    """Load the config file, falling back to defaults for missing keys.
+    Returns {"firewall": {...}, "env": {...}}."""
     cfg = configparser.ConfigParser()
+    cfg.optionxform = str  # preserve env var case
     cfg.read(path or DEFAULT_CONFIG)
     out = dict(DEFAULTS)
     if cfg.has_section("firewall"):
@@ -40,4 +50,8 @@ def load_config(path: str | None = None) -> dict:
         out["includedir"] = out["dir"]
     if not out["db"]:
         out["db"] = os.path.join(out["dir"], "db")
-    return out
+    env = dict(DEFAULT_ENV)
+    if cfg.has_section("environment"):
+        for k in cfg.options("environment"):
+            env[k] = cfg.get("environment", k).strip()
+    return {"firewall": out, "env": env}

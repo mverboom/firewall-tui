@@ -724,10 +724,12 @@ class FirewallApp(App):
                  config_path: str | None = None) -> None:
         super().__init__()
         cfg = load_config(config_path)
-        self.fwdir = fwdir or cfg["dir"]
-        self.includedir = includedir or cfg["includedir"]
-        self.db_path = cfg["db"]
-        self.deploy_command = cfg["deploy_command"]
+        fw = cfg["firewall"]
+        self.fwdir = fwdir or fw["dir"]
+        self.includedir = includedir or fw["includedir"]
+        self.db_path = fw["db"]
+        self.deploy_command = fw["deploy_command"]
+        self.deploy_env = cfg["env"]
         self.hosts: list[str] = []
         self.lines: list[parser.Line] = []
         self.dblines: list[parser.DbLine] = []
@@ -1553,13 +1555,7 @@ class FirewallApp(App):
         import shlex
         import subprocess
         env = os.environ.copy()
-        env.update({
-            "CDIST_BETA": "1",
-            "CDIST_INSTALL": "/home/cdist/cdist",
-            "CDIST_EXPLORE": "/home/cdist/explore",
-            "CDIST_INVENTORY": "/home/cdist/.cdist/inventory",
-            "CDIST_CONFIG_DIR": "/home/cdist/config",
-        })
+        env.update(self.deploy_env)
         cmd = shlex.split(self.deploy_command.format(host=host))
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True,
