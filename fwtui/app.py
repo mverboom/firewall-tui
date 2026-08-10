@@ -192,7 +192,8 @@ CUSTOM = "__custom__"
 
 
 def build_rule(chain: str, iface: str, src: str, dst: str, svc: str,
-               action: str, to: str, extra: str) -> str:
+               action: str, to: str, extra: str,
+               logprefix: str = "") -> str:
     parts = [f"-A {chain}"]
     if iface:
         parts.append(f"-i {iface}")
@@ -213,7 +214,9 @@ def build_rule(chain: str, iface: str, src: str, dst: str, svc: str,
     elif action == "MASQUERADE":
         parts.append("-j MASQUERADE")
     elif action == "log":
-        parts.append("log(firewall)")
+        parts.append(f"log({logprefix or 'firewall'})")
+    elif action.startswith("reject("):
+        parts.append(action)  # e.g. reject(unreachable)
     else:
         parts.append(f"-j {action}")
     if extra:
@@ -339,6 +342,9 @@ class RuleEditor(ModalScreen):
                     value="", id="f-to-svc",
                     classes="fselect -textual-compact", allow_blank=False),
                     classes="natrow")
+                yield self._row("Log prefix", Input(
+                    placeholder="e.g. apache dropped", id="f-logprefix",
+                    classes="finput -textual-compact"), classes="logrow")
                 yield self._row("Extra", Input(
                     placeholder="e.g. -m limit --limit 10/min", id="f-extra",
                     classes="finput -textual-compact"))
@@ -360,7 +366,7 @@ class RuleEditor(ModalScreen):
         self._syncing = False
         self._sync_timer = None
         self._sync_from_raw()
-        self._update_nat_rows()
+        self._update_conditional_rows()
 
     def on_text_area_changed(self, event) -> None:
         """Raw text edited: re-parse the fields (debounced so partial typing
@@ -371,12 +377,16 @@ class RuleEditor(ModalScreen):
             self._sync_timer.stop()
         self._sync_timer = self.set_timer(0.5, self._sync_from_raw)
 
-    def _update_nat_rows(self) -> None:
-        """Show the To host/To svc rows only for DNAT/SNAT actions."""
+    def _update_conditional_rows(self) -> None:
+        """Show the To host/To svc rows only for DNAT/SNAT, and the Log
+        prefix row only for the log action."""
         action = self.query_one("#f-action", Select).value
-        show = action in ("DNAT", "SNAT")
+        show_nat = action in ("DNAT", "SNAT")
         for row in self.query(".natrow"):
-            row.set_class(show, "-show")
+            row.set_class(show_nat, "-show")
+        show_log = action == "log"
+        for row in self.query(".logrow"):
+            row.set_class(show_log, "-show")
 
     def _sync_from_raw(self) -> None:
         import re
@@ -415,6 +425,14 @@ class RuleEditor(ModalScreen):
                 act = m.group(1)
                 if act in ("ACCEPT", "DROP", "DNAT", "SNAT", "MASQUERADE"):
                     self.query_one("#f-action", Select).value = act
+            # function actions: reject(...) and log(prefix)
+            m = re.search(r"reject\((reset|unreachable|prohibited)\)", raw)
+            if m:
+                self.query_one("#f-action", Select).value = f"reject({m.group(1)})"
+            m = re.search(r"log\(([^)]*)\)", raw)
+            if m:
+                self.query_one("#f-action", Select).value = "log"
+                self.query_one("#f-logprefix", Input).value = m.group(1).strip()
             m = re.search(r"--to-(?:destination|source)\s+(\S+)", raw)
             if m:
                 target = m.group(1)
@@ -425,7 +443,7 @@ class RuleEditor(ModalScreen):
                     self.query_one("#f-to-svc", Select).value = svc_part
         finally:
             self._syncing = False
-        self._update_nat_rows()
+        self._update_conditional_rows()
 
     def _to_host_options(self) -> set:
         return {f"host({h})" for h in self.hosts}
@@ -444,13 +462,14 @@ class RuleEditor(ModalScreen):
         to_svc = self.query_one("#f-to-svc", Select).value or ""
         to = to_host + (f":{to_svc}" if to_svc else "")
         extra = self.query_one("#f-extra", Input).value
+        logprefix = self.query_one("#f-logprefix", Input).value
         self.query_one("#f-raw", TextArea).text = build_rule(
-            chain, iface, src, dst, svc, action, to, extra)
+            chain, iface, src, dst, svc, action, to, extra, logprefix)
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if self._syncing:
             return
-        if event.input.id in ("f-iface", "f-extra"):
+        if event.input.id in ("f-iface", "f-extra", "f-logprefix"):
             self._rebuild_raw()
 
     def on_select_changed(self, event: Select.Changed) -> None:
@@ -467,7 +486,7 @@ class RuleEditor(ModalScreen):
                                "f-iface"):
             self._rebuild_raw()
         if event.select.id == "f-action":
-            self._update_nat_rows()
+            self._update_conditional_rows()
 
     def _open_custom_value(self, wid: str) -> None:
         """'(custom ...)' picked in Source/Dest/Iface: prompt for a value."""
@@ -576,7 +595,7 @@ class RuleEditor(ModalScreen):
     # -- form navigation ----------------------------------------------------
     FIELD_IDS = ("f-table", "f-proto", "f-chain", "f-iface", "f-src",
                  "f-dst", "f-svc", "f-action", "f-to-host", "f-to-svc",
-                 "f-extra", "f-raw")
+                 "f-logprefix", "f-extra", "f-raw")
 
     def _fields(self) -> list:
         return [self.query_one(f"#{wid}") for wid in self.FIELD_IDS]
@@ -961,6 +980,8 @@ class FirewallApp(App):
     .fhint { margin: 0 0 1 1; text-style: dim; }
     .natrow { display: none; }
     .natrow.-show { display: block; }
+    .logrow { display: none; }
+    .logrow.-show { display: block; }
     .flabel { width: 22; padding: 0 1 0 0; }
     .fselect { width: 1fr; }
     .finput { width: 1fr; }
