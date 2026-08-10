@@ -57,6 +57,31 @@ GLOBAL_OPTIONS = {
     "proto": ["4", "6", "4,6"],
 }
 
+# All global keys in display order, with the manifest's effective default
+# when the key is not present in the rules file (mirrors __firewall/manifest
+# and man.rst). policy_* inherits policy, log_* inherits log.
+GLOBAL_ORDER = (
+    "policy", "policy_input", "policy_output", "policy_forward",
+    "established", "icmp", "proto", "log",
+    "log_input", "log_forward", "log_output",
+    "loopback", "packageinstall",
+)
+GLOBAL_DEFAULTS = {
+    "policy": "accept",
+    "policy_input": "",   # inherits policy
+    "policy_output": "",
+    "policy_forward": "",
+    "established": "false",
+    "icmp": "(unset)",    # manifest: no icmp rules when unset
+    "proto": "4",
+    "log": "",
+    "log_input": "",
+    "log_forward": "",
+    "log_output": "",
+    "loopback": "true",
+    "packageinstall": "true",
+}
+
 
 class NavSelect(Select, inherit_bindings=False):
     """Select that opens only with enter/space; up/down bubble for navigation.
@@ -877,6 +902,7 @@ class FirewallApp(App):
         gt = self.query_one("#global-table", DataTable)
         gt.add_column("key", width=16)
         gt.add_column("value", width=40)
+        gt.add_column("state", width=10)
         self.db_view = self.query_one("#db-view", DbView)
         sel = self.query_one("#host-select", Select)
         sel.add_class("-textual-compact")
@@ -966,10 +992,47 @@ class FirewallApp(App):
             self.rules_view.set_rows(rows, reset_collapsed=reset_collapsed)
 
     def _populate_global(self) -> None:
+        """Show every global key: file values, or the manifest default for
+        keys not present in the file (marked '(default)')."""
         t = self.query_one("#global-table", DataTable)
         t.clear()
-        for l in parser.global_lines(self.lines):
-            t.add_row(l.key, l.value)
+        present = {l.key: l.value for l in parser.global_lines(self.lines)}
+        for key in GLOBAL_ORDER:
+            if key in present:
+                t.add_row(key, present[key], "")
+            else:
+                t.add_row(key, self._global_default(key), "(default)")
+
+    def _global_default(self, key: str) -> str:
+        """Effective default for a global key (policy_* inherits policy,
+        log_* inherits log)."""
+        if key.startswith("policy_"):
+            present = {l.key: l.value for l in parser.global_lines(self.lines)}
+            return present.get("policy", GLOBAL_DEFAULTS["policy"])
+        if key.startswith("log_"):
+            present = {l.key: l.value for l in parser.global_lines(self.lines)}
+            return present.get("log", "")
+        return GLOBAL_DEFAULTS[key]
+
+    def _insert_global(self, key: str, value: str) -> None:
+        """Insert a global key=value line after the [global] header (creating
+        the section at the top if the file has none)."""
+        host = os.path.join(self.fwdir, self.current_host)
+        line = parser.Line(raw=f"{key}={value}", kind="global", key=key,
+                           value=value)
+        line.source = host
+        for i, l in enumerate(self.lines):
+            if l.kind == "section" and l.name == "global":
+                j = i
+                while j + 1 < len(self.lines) \
+                        and self.lines[j + 1].kind == "global":
+                    j += 1
+                self.lines.insert(j + 1, line)
+                return
+        header = parser.Line(raw="[global]", kind="section", name="global")
+        header.source = host
+        self.lines.insert(0, header)
+        self.lines.insert(1, line)
 
     def _populate_db(self) -> None:
         rows: list[tuple] = []
@@ -1451,7 +1514,6 @@ class FirewallApp(App):
     def _on_global_kv(self, kv) -> None:
         if not kv or "=" not in kv:
             return
-        self._snapshot()
         key, value = kv.split("=", 1)
         key, value = key.strip(), value.strip()
         if key not in parser.GLOBAL_KEYS:
@@ -1461,15 +1523,16 @@ class FirewallApp(App):
             self.notify(f"'{key}' must be one of: {', '.join(GLOBAL_OPTIONS[key])}",
                         severity="error")
             return
-        # insert after the [global] header
-        for i, l in enumerate(self.lines):
-            if l.kind == "section" and l.name == "global":
-                j = i
-                while j + 1 < len(self.lines) and self.lines[j + 1].kind == "global":
-                    j += 1
-                self.lines.insert(j + 1, parser.Line(
-                    raw=f"{key}={value}", kind="global", key=key, value=value))
-                break
+        if value == "(unset)":
+            self.notify("'(unset)' is the default; leave the key out of the file",
+                        severity="warning")
+            return
+        if any(l.kind == "global" and l.key == key for l in self.lines):
+            self.notify(f"'{key}' is already set in this file; edit it instead",
+                        severity="warning")
+            return
+        self._snapshot()
+        self._insert_global(key, value)
         self.dirty = True
         self._populate_global()
         self._populate_rules()
@@ -1479,9 +1542,11 @@ class FirewallApp(App):
         if not t.row_count:
             return
         rk, _ = t.coordinate_to_cell_key(t.cursor_coordinate)
-        key, value = t.get_row(rk)
+        key, value, _ = t.get_row(rk)
         if key in GLOBAL_OPTIONS:
             opts = [(v, v) for v in GLOBAL_OPTIONS[key]]
+            if value not in [v for _, v in opts]:
+                opts.append((value, value))  # e.g. the "(unset)" default
             self.push_screen(SelectPrompt(f"Edit {key}", opts, value=value),
                              lambda res, k=key: self._on_global_kv_edit(k, res))
         else:
@@ -1497,6 +1562,8 @@ class FirewallApp(App):
         else:
             # from SelectPrompt: just the value, keep the key
             key, value = old_key, kv.strip()
+        if value == "(unset)":
+            return  # keep the manifest default (no explicit setting)
         for l in self.lines:
             if l.kind == "global" and l.key == old_key:
                 if l.key == key and l.value == value:
@@ -1506,6 +1573,12 @@ class FirewallApp(App):
                 l.value = value
                 l.raw = l.render()
                 break
+        else:
+            # key not in the file yet (was showing its default): add it
+            if value == self._global_default(key):
+                return  # same as the default: no need to write it
+            self._snapshot()
+            self._insert_global(key, value)
         self.dirty = True
         self._populate_global()
         self._populate_rules()
@@ -1514,9 +1587,13 @@ class FirewallApp(App):
         t = self.query_one("#global-table", DataTable)
         if not t.row_count:
             return
-        self._snapshot()
         rk, _ = t.coordinate_to_cell_key(t.cursor_coordinate)
-        key, _ = t.get_row(rk)
+        key, _, state = t.get_row(rk)
+        if state == "(default)":
+            self.notify(f"'{key}' is not set in this file (using the default); "
+                        "nothing to delete", severity="warning")
+            return
+        self._snapshot()
         self.lines = [l for l in self.lines
                       if not (l.kind == "global" and l.key == key)]
         self.dirty = True
