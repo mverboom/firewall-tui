@@ -900,7 +900,7 @@ class FirewallApp(App):
         self.tabs = self.query_one("#tabs", TabbedContent)
         self.query_one("#rules-header", Static).update(header_text())
         gt = self.query_one("#global-table", DataTable)
-        gt.add_column("key", width=16)
+        gt.add_column("Option", width=16)
         gt.add_column("value", width=40)
         gt.add_column("state", width=10)
         self.db_view = self.query_one("#db-view", DbView)
