@@ -214,13 +214,13 @@ def _expand_one(funcname: str, args: str, db: Db, proto: int,
         return f"-p {sproto} -m multiport --dports {','.join(ports)}", errs, warns
 
     if funcname == "host":
-        ip = _hostlookup(args, db, proto, warns)
+        ip = _hostlookup(args, db, proto, errs, warns)
         return ip, errs, warns
 
     if funcname == "hosts":
         ips = []
         for h in args.split(","):
-            ips.append(_hostlookup(h.strip(), db, proto, warns))
+            ips.append(_hostlookup(h.strip(), db, proto, errs, warns))
         return ",".join(ips), errs, warns
 
     if funcname == "hostgroup":
@@ -230,7 +230,7 @@ def _expand_one(funcname: str, args: str, db: Db, proto: int,
         return f"-m set --match-set {proto}-ip-{args}", errs, warns
 
     if funcname == "network":
-        net = _netlookup(args, db, proto, warns)
+        net = _netlookup(args, db, proto, errs, warns)
         return net, errs, warns
 
     if funcname == "networkgroup":
@@ -243,7 +243,8 @@ def _expand_one(funcname: str, args: str, db: Db, proto: int,
     return args, errs, warns
 
 
-def _hostlookup(name: str, db: Db, proto: int, warns: list[str]) -> str:
+def _hostlookup(name: str, db: Db, proto: int, errs: list[str],
+                warns: list[str]) -> str:
     p = chkproto(name)
     if p == proto:
         return name
@@ -256,11 +257,13 @@ def _hostlookup(name: str, db: Db, proto: int, warns: list[str]) -> str:
     if ip:
         warns.append(f"Host '{name}' resolved via DNS (not in db)")
         return ip
-    warns.append(f"Host '{name}' not in db and DNS lookup failed")
+    # the manifest aborts on this; report it as an error
+    errs.append(f"Host '{name}' not in db and DNS lookup failed")
     return name
 
 
-def _netlookup(name: str, db: Db, proto: int, warns: list[str]) -> str:
+def _netlookup(name: str, db: Db, proto: int, errs: list[str],
+               warns: list[str]) -> str:
     p = chkproto(name.split("/", 1)[0])
     if p == proto:
         return name
@@ -268,7 +271,8 @@ def _netlookup(name: str, db: Db, proto: int, warns: list[str]) -> str:
     for val in parts:
         if chkproto(val.split("/", 1)[0]) == proto:
             return val
-    warns.append(f"Network '{name}' not found in db for IPv{proto}")
+    # the manifest aborts on this; report it as an error
+    errs.append(f"Network '{name}' not found in db for IPv{proto}")
     return name
 
 

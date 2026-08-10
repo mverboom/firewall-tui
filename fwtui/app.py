@@ -202,7 +202,10 @@ def build_rule(chain: str, iface: str, src: str, dst: str, svc: str,
     if dst:
         parts.append(f"-d {dst}")
     if svc:
-        parts.append(f"dservice({svc})")
+        if svc.startswith("dservices("):
+            parts.append(svc)  # multiport form, keep as-is
+        else:
+            parts.append(f"dservice({svc})")
     if action == "DNAT":
         parts.append("-j DNAT")
         if to:
@@ -415,6 +418,10 @@ class RuleEditor(ModalScreen):
             if m:
                 self._set_select_value(self.query_one("#f-dst", Select),
                                        m.group(1))
+            m = re.search(r"dservices\(([^)]+)\)", raw)
+            if m:
+                self._set_select_value(self.query_one("#f-svc", Select),
+                                       f"dservices({m.group(1)})")
             m = re.search(r"dservice\(([^)]+)\)", raw)
             if m:
                 svc = m.group(1)
@@ -437,10 +444,12 @@ class RuleEditor(ModalScreen):
             if m:
                 target = m.group(1)
                 host_part, _, svc_part = target.partition(":")
-                if host_part in self._to_host_options():
-                    self.query_one("#f-to-host", Select).value = host_part
-                if svc_part and svc_part in self._to_svc_options():
-                    self.query_one("#f-to-svc", Select).value = svc_part
+                if host_part:
+                    self._set_select_value(self.query_one("#f-to-host", Select),
+                                           host_part)
+                if svc_part:
+                    self._set_select_value(self.query_one("#f-to-svc", Select),
+                                           svc_part)
         finally:
             self._syncing = False
         self._update_conditional_rows()
@@ -572,7 +581,8 @@ class RuleEditor(ModalScreen):
         self.notify(f"Added {section}:{key}")
 
     def _refresh_db_dropdowns(self) -> None:
-        """Rebuild the db-backed dropdowns, preserving current values."""
+        """Rebuild the db-backed dropdowns, preserving current values
+        (raw values that are not db entries are re-added as options)."""
         for wid, opts in (
             ("#f-svc", [("(none)", "")] + [(s, s) for s in self.services]),
             ("#f-to-host", [("(none)", "")]
@@ -583,8 +593,7 @@ class RuleEditor(ModalScreen):
             sel = self.query_one(wid, Select)
             cur = sel.value
             sel.set_options(opts)
-            if cur in [v for _, v in opts]:
-                sel.value = cur
+            self._set_select_value(sel, cur)
         for wid in ("#f-src", "#f-dst"):
             sel = self.query_one(wid, Select)
             cur = sel.value

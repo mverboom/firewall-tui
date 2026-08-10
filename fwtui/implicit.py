@@ -61,11 +61,15 @@ def implicit_rules(globals_: dict) -> tuple[list[tuple[str, list[dict]]],
     elif globals_.get("icmp") == "true":
         bottom.append(("global: icmp", [_row("input", "accept", "icmp")]))
 
-    # log: appended at the end of each chain (catches unmatched traffic)
-    log = globals_.get("log")
-    if log:
-        bottom.append(("global: log",
-                       [_row(c, "log", f"log: {log}") for c in CHAINS]))
+    # log: appended at the end of each chain (catches unmatched traffic);
+    # log_<chain> takes precedence, falls back to log (mirrors the manifest)
+    log_rows = []
+    for c in CHAINS:
+        prefix = globals_.get(f"log_{c}") or globals_.get("log")
+        if prefix:
+            log_rows.append(_row(c, "log", f"log: {prefix}"))
+    if log_rows:
+        bottom.append(("global: log", log_rows))
 
     # policy: the chain default - the last action for unmatched traffic
     p_rows = []

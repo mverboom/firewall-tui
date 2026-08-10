@@ -60,13 +60,17 @@ class Line:
 
 
 def _classify_rule_key(key: str) -> tuple[str, str] | None:
-    """Split a rule key into (table, proto). None if not a table key."""
+    """Split a rule key into (table, proto). None if not a table key.
+    Mirrors the manifest: any combination of 4/6 chars after the table
+    name is accepted (filter464 behaves like filter46)."""
     for table in TABLE_KEYS:
         if key == table:
             return table, ""
-        for p in PROTO_SUFFIXES[1:]:
-            if key == table + p:
-                return table, p
+        if key.startswith(table):
+            suffix = key[len(table):]
+            if suffix and set(suffix) <= {"4", "6"}:
+                proto = "46" if "4" in suffix and "6" in suffix else suffix[0]
+                return table, proto
     return None
 
 
