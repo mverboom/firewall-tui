@@ -595,6 +595,27 @@ class SelectPrompt(ModalScreen):
 # unsaved-changes confirmation modal
 
 class ConfirmQuit(ModalScreen):
+    """Unsaved-changes confirmation, shown as a prominent centered dialog."""
+
+    CSS = """
+    ConfirmQuit {
+        align: center middle;
+    }
+    ConfirmQuit > Vertical {
+        width: auto;
+        height: auto;
+        border: round $error;
+        background: $surface;
+        padding: 1 2;
+    }
+    ConfirmQuit > Vertical > * {
+        width: auto;
+    }
+    ConfirmQuit #modal-buttons {
+        align-horizontal: center;
+    }
+    """
+
     BINDINGS = [
         Binding("escape", "no", "Cancel"),
         Binding("y", "yes", "Quit"),
@@ -602,10 +623,11 @@ class ConfirmQuit(ModalScreen):
     ]
 
     def compose(self) -> ComposeResult:
-        yield Static("Unsaved changes - quit anyway?", classes="modal-title")
-        with Horizontal(id="modal-buttons"):
-            yield Button("Quit", variant="error", id="btn-quit")
-            yield Button("Cancel", id="btn-cancel")
+        with Vertical(id="quit-dialog"):
+            yield Static("Unsaved changes - quit anyway?", classes="modal-title")
+            with Horizontal(id="modal-buttons"):
+                yield Button("Quit", variant="error", id="btn-quit")
+                yield Button("Cancel", id="btn-cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-quit":
