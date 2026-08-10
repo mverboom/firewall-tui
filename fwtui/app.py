@@ -955,9 +955,13 @@ class GitHistory(ModalScreen):
         Binding("escape", "close", "Close"),
         Binding("q", "close", "Close"),
         Binding("tab", "toggle_focus", "Toggle focus", show=False),
+        Binding("shift+tab", "toggle_focus_reverse", "Toggle focus",
+                show=False),
         Binding("enter", "load_version", "Load version", show=False),
         Binding("f", "toggle_view", "Diff/content", show=False),
     ]
+
+    FOCUS_ORDER = ("#commit-list", "#diff-view", "#btn-load", "#btn-close")
 
     def __init__(self, host: str, fwdir: str) -> None:
         super().__init__()
@@ -976,6 +980,8 @@ class GitHistory(ModalScreen):
         with Horizontal(id="modal-buttons"):
             yield Button("Load version", id="btn-load")
             yield Button("Close", id="btn-close")
+        yield Static("tab: cycle focus   enter: load version   f: diff/content   "
+                     "esc: close", id="git-hint")
 
     def on_mount(self) -> None:
         self._load_commits()
@@ -1084,11 +1090,24 @@ class GitHistory(ModalScreen):
         self.dismiss({"commit": h, "content": out})
 
     def action_toggle_focus(self) -> None:
-        """Tab: move between the commit list and the diff view."""
-        if self.focused is self.query_one("#commit-list"):
-            self.query_one("#diff-view", TextArea).focus()
-        else:
-            self.query_one("#commit-list", ListView).focus()
+        """Tab: cycle focus list -> diff -> buttons -> list."""
+        self._focus_cycle(1)
+
+    def action_toggle_focus_reverse(self) -> None:
+        """Shift+tab: cycle focus the other way."""
+        self._focus_cycle(-1)
+
+    def _focus_cycle(self, step: int) -> None:
+        idx = -1
+        for i, wid in enumerate(self.FOCUS_ORDER):
+            if self.focused is self.query_one(wid):
+                idx = i
+                break
+        if idx < 0:
+            self.query_one("#commit-list").focus()
+            return
+        self.query_one(self.FOCUS_ORDER[(idx + step) % len(self.FOCUS_ORDER)])\
+            .focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-load":
