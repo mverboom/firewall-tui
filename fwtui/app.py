@@ -1531,6 +1531,13 @@ class FirewallApp(App):
             elif isinstance(focused, ContentTabs):
                 self._focus_content()
                 event.stop()
+            elif focused is self.query_one("#db-button", Button):
+                # down from the db button: back to the db view (or the tabs)
+                if self.db_mode:
+                    self.db_view.focus()
+                else:
+                    self._focus_tabs()
+                event.stop()
         elif event.key == "up":
             if isinstance(focused, ContentTabs):
                 self.host_select.focus()
@@ -1662,8 +1669,8 @@ class FirewallApp(App):
             self._edit_db_entry()
 
     def on_db_view_navigate_up(self, event) -> None:
-        """Up at the top of the db view: focus the menu (top bar)."""
-        self.host_select.focus()
+        """Up at the top of the db view: focus the db button."""
+        self.query_one("#db-button", Button).focus()
 
     def _selected_row(self) -> tuple:
         """Return (index, row_info) of the selected row in the active view."""
