@@ -120,12 +120,24 @@ class HostSelect(NavSelect):
     async def _on_key(self, event: events.Key) -> None:
         if (event.character is not None and event.is_printable
                 and not self.expanded):
-            # typing searches: open the dropdown and feed the key to it
+            # typing searches: open the dropdown and feed the key to it.
+            # The overlay resets its search query when it gains focus, and
+            # focus is applied asynchronously, so feed the char afterwards.
             self.action_show_overlay()
-            await self.query_one(SelectOverlay)._on_key(event)
+            char = event.character
             event.stop()
+            self.call_after_refresh(lambda: self._feed_search(char))
             return
         await super()._on_key(event)
+
+    def _feed_search(self, char: str) -> None:
+        """Add a character to the overlay's search query (mirrors
+        SelectOverlay._on_key)."""
+        overlay = self.query_one(SelectOverlay)
+        overlay._search_query += char
+        index = overlay._find_search_match(overlay._search_query)
+        if index is not None:
+            overlay.select(index)
 
 
 class NavDataTable(DataTable):
@@ -810,6 +822,45 @@ class OutputModal(ModalScreen):
     def compose(self) -> ComposeResult:
         yield Static(self._title, classes="modal-title")
         yield TextArea(self._text, read_only=True, id="report")
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
+class DeployModal(ModalScreen):
+    """Modal showing the live output of the deploy command as it runs."""
+
+    CSS = """
+    DeployModal #deploy-output {
+        height: 20;
+    }
+    """
+
+    BINDINGS = [Binding("escape", "close", "Close"), Binding("q", "close", "Close")]
+
+    def __init__(self, title: str) -> None:
+        super().__init__()
+        self._title = title
+        self._chunks: list[str] = []
+
+    def compose(self) -> ComposeResult:
+        yield Static(self._title, classes="modal-title")
+        yield TextArea("", read_only=True, id="deploy-output")
+        with Horizontal(id="modal-buttons"):
+            yield Button("Close", id="btn-close")
+
+    def append(self, text: str) -> None:
+        """Append output (called from the deploy worker)."""
+        if not self.is_mounted:
+            return
+        self._chunks.append(text)
+        ta = self.query_one("#deploy-output", TextArea)
+        ta.text = "".join(self._chunks)
+        ta.scroll_end(animate=False)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-close":
+            self.dismiss(None)
 
     def action_close(self) -> None:
         self.dismiss(None)
@@ -1749,31 +1800,49 @@ class FirewallApp(App):
 
     # -- deploy and git ----------------------------------------------------
     def action_deploy(self) -> None:
-        """Run the configured deploy command for the current host in a
-        worker (the command may be a real deploy or a dry run, depending on
-        the config)."""
+        """Run the configured deploy command for the current host, showing
+        the live output in a modal (the command may be a real deploy or a
+        dry run, depending on the config)."""
         if not self.current_host:
             self.notify("Select a host first", severity="warning")
             return
         host = self.current_host
-        self.notify(f"Deploying {host}...")
-        self.run_worker(lambda: self._deploy_worker(host), exclusive=True,
-                        thread=True)
+        modal = DeployModal(f"Deploy {host}")
+        self.push_screen(modal)
+        self.run_worker(self._deploy_worker(host, modal), exclusive=True)
 
-    def _deploy_worker(self, host: str) -> None:
+    async def _deploy_worker(self, host: str, modal: DeployModal) -> None:
+        """Run the deploy command, streaming its output to the modal."""
+        import asyncio
         import shlex
-        import subprocess
+        # wait until the modal is mounted so early output is not lost
+        while not modal.is_mounted:
+            await asyncio.sleep(0.01)
         env = os.environ.copy()
         env.update(self.deploy_env)
         cmd = shlex.split(self.deploy_command.format(host=host))
+        modal.append(f"$ {' '.join(cmd)}\n")
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True,
-                                  env=env, timeout=180)
-            output = proc.stdout + proc.stderr
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT, env=env)
+
+            async def read_output() -> int:
+                while True:
+                    line = await proc.stdout.readline()
+                    if not line:
+                        break
+                    modal.append(line.decode(errors="replace"))
+                return await proc.wait()
+
+            try:
+                returncode = await asyncio.wait_for(read_output(), timeout=180)
+                modal.append(f"\n[exit code {returncode}]")
+            except asyncio.TimeoutError:
+                proc.kill()
+                modal.append("\n[timed out after 180s]")
         except Exception as e:
-            output = f"Error running deploy command: {e}"
-        self.call_from_thread(self.push_screen,
-                              OutputModal(f"Deploy {host}", output))
+            modal.append(f"\nError running deploy command: {e}")
 
     def action_git_diff(self) -> None:
         """Show git diff for the current host's files (and include files)."""
