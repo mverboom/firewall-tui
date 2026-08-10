@@ -25,6 +25,9 @@ DEFAULTS = {
     "db": "",
     "deploy_command": "/home/cdist/cdist/bin/cdist config -n "
                       "-c /home/cdist/config {host}",
+    # directory with the last explorer data per host (enables the interface
+    # dropdown in the rule editor); empty = feature off
+    "explore_dir": "",
 }
 
 DEFAULT_ENV = {

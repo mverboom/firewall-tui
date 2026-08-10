@@ -77,6 +77,7 @@ Configuration is read from an INI file. Lookup order:
 | `dir` | `/home/cdist/config/files/firewall` | directory containing the per-host rulesets |
 | `includedir` | `dir` | directory for `[#include]` files |
 | `db` | `dir/db` | path to the shared db file |
+| `explore_dir` | *(empty)* | directory with the last explorer data per host (e.g. `/home/cdist/explore`); when set, the rule editor shows a dropdown of the host's interfaces (from `<explore_dir>/<host>/interfaces`) for the Iface field, with a `(custom ...)` entry for arbitrary values |
 | `deploy_command` | `cdist config -n -c /home/cdist/config {host}` | command run by `p`; `{host}` is replaced with the hostname |
 
 `[environment]` section: environment variables exported for the deploy

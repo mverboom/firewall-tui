@@ -235,7 +235,8 @@ class RuleEditor(ModalScreen):
     ]
 
     def __init__(self, table: str, proto: str, text: str = "",
-                 db: "expand.Db | None" = None) -> None:
+                 db: "expand.Db | None" = None,
+                 ifaces: list[str] | None = None) -> None:
         super().__init__()
         self.table = table
         self.proto = proto if proto in ("4", "6", "46") else "4"
@@ -246,6 +247,13 @@ class RuleEditor(ModalScreen):
         self.networks = list(self.db.networks)
         self.hostgroups = list(self.db.hostgroups)
         self.networkgroups = list(self.db.networkgroups)
+        # interfaces from the host's last explorer run (empty = plain input)
+        self.ifaces = ifaces or []
+
+    def _iface_options(self) -> list:
+        opts = [("(any)", "")] + [(i, i) for i in self.ifaces]
+        opts.append(("(custom ...)", CUSTOM))
+        return opts
 
     def _source_options(self) -> list:
         """Options for the Source/Dest fields: db hosts, networks, groups,
@@ -299,9 +307,13 @@ class RuleEditor(ModalScreen):
                 yield self._row("Chain", NavSelect(
                     CHAINS, id="f-chain",
                     classes="fselect -textual-compact", allow_blank=False))
-                yield self._row("Iface (-i)", Input(
-                    placeholder="e.g. eth0, vlan10", id="f-iface",
-                    classes="finput -textual-compact"))
+                yield self._row("Iface (-i)",
+                    NavSelect(self._iface_options(), value="", id="f-iface",
+                              classes="fselect -textual-compact",
+                              allow_blank=False)
+                    if self.ifaces else Input(
+                        placeholder="e.g. eth0, vlan10", id="f-iface",
+                        classes="finput -textual-compact"))
                 yield self._row("Source (-s)", NavSelect(
                     self._source_options(), value="", id="f-src",
                     classes="fselect -textual-compact", allow_blank=False))
@@ -383,7 +395,11 @@ class RuleEditor(ModalScreen):
                         self._set_select_value(self.query_one(wid, Select),
                                                m.group(1))
                     else:
-                        self.query_one(wid, Input).value = m.group(1)
+                        w = self.query_one(wid)
+                        if isinstance(w, Input):
+                            w.value = m.group(1)
+                        else:
+                            self._set_select_value(w, m.group(1))
             # DNAT/SNAT rules use the long form --destination; capture it too
             m = re.search(r"--destination\s+(\S+)", raw)
             if m:
@@ -419,7 +435,7 @@ class RuleEditor(ModalScreen):
 
     def _rebuild_raw(self) -> None:
         chain = self.query_one("#f-chain", Select).value or "INPUT"
-        iface = self.query_one("#f-iface", Input).value
+        iface = self.query_one("#f-iface").value  # Input or Select
         src = self.query_one("#f-src", Select).value or ""
         dst = self.query_one("#f-dst", Select).value or ""
         svc = self.query_one("#f-svc", Select).value or ""
@@ -440,24 +456,32 @@ class RuleEditor(ModalScreen):
     def on_select_changed(self, event: Select.Changed) -> None:
         if self._syncing:
             return
-        if event.value == CUSTOM and event.select.id in ("f-src", "f-dst"):
+        if event.value == CUSTOM and event.select.id in (
+                "f-src", "f-dst", "f-iface"):
             # "(custom ...)": ask for a raw value; do NOT rebuild the raw
             # text with the sentinel (it still holds the previous value)
             self._open_custom_value(event.select.id)
             return
         if event.select.id in ("f-chain", "f-action", "f-svc",
-                               "f-to-host", "f-to-svc", "f-src", "f-dst"):
+                               "f-to-host", "f-to-svc", "f-src", "f-dst",
+                               "f-iface"):
             self._rebuild_raw()
         if event.select.id == "f-action":
             self._update_nat_rows()
 
     def _open_custom_value(self, wid: str) -> None:
-        """'(custom ...)' picked in Source/Dest: prompt for any raw value."""
-        label = "Source" if wid == "f-src" else "Dest"
+        """'(custom ...)' picked in Source/Dest/Iface: prompt for a value."""
+        if wid == "f-iface":
+            title, placeholder = "Interface value", "e.g. eth0, vlan10"
+        elif wid == "f-src":
+            title, placeholder = ("Source value (db entry or raw IP/address)",
+                                  "e.g. 192.168.1.77, host(x), network(y)")
+        else:
+            title, placeholder = ("Dest value (db entry or raw IP/address)",
+                                  "e.g. 192.168.1.77, host(x), network(y)")
         self.app.push_screen(
-            Prompt(f"{label} value (db entry or raw IP/address)",
-                   value=self._current_field_value(wid),
-                   placeholder="e.g. 192.168.1.77, host(x), network(y)"),
+            Prompt(title, value=self._current_field_value(wid),
+                   placeholder=placeholder),
             lambda res, w=wid: self._on_custom_value(w, res))
 
     def _current_field_value(self, wid: str) -> str:
@@ -467,9 +491,11 @@ class RuleEditor(ModalScreen):
         raw = self.query_one("#f-raw", TextArea).text
         if wid == "f-src":
             m = re.search(r"-s\s+(\S+)", raw)
-        else:
+        elif wid == "f-dst":
             m = (re.search(r"--destination\s+(\S+)", raw)
                  or re.search(r"-d\s+(\S+)", raw))
+        else:  # f-iface
+            m = re.search(r"-i\s+(\S+)", raw)
         return m.group(1) if m else ""
 
     def _on_custom_value(self, wid: str, res) -> None:
@@ -957,6 +983,7 @@ class FirewallApp(App):
         self.db_path = fw["db"]
         self.deploy_command = fw["deploy_command"]
         self.deploy_env = cfg["env"]
+        self.explore_dir = fw["explore_dir"]
         self.hosts: list[str] = []
         self.lines: list[parser.Line] = []
         self.dblines: list[parser.DbLine] = []
@@ -1018,6 +1045,29 @@ class FirewallApp(App):
             and not f.startswith(".")
             and f != "db"
         )
+
+    def _host_interfaces(self, host: str) -> list[str]:
+        """Interface names from the last explorer run for a host (strips
+        veth peer suffixes like lnw@if55 -> lnw). Empty when unavailable."""
+        path = os.path.join(self.explore_dir, host, "interfaces")
+        try:
+            with open(path) as fh:
+                seen: set[str] = set()
+                out: list[str] = []
+                for line in fh:
+                    name = line.strip().split("@", 1)[0]
+                    if name and name not in seen:
+                        seen.add(name)
+                        out.append(name)
+                return out
+        except OSError:
+            return []
+
+    def _current_ifaces(self) -> list[str]:
+        """Interfaces for the current host (empty when the feature is off)."""
+        if not self.explore_dir or not self.current_host:
+            return []
+        return self._host_interfaces(self.current_host)
 
     def _load_db(self) -> None:
         if os.path.exists(self.db_path):
@@ -1333,7 +1383,8 @@ class FirewallApp(App):
             return
         if self.rules_view:
             self.rules_view.expand_section(section)
-        self.push_screen(RuleEditor("filter", "4", db=self.db),
+        self.push_screen(RuleEditor("filter", "4", db=self.db,
+                                    ifaces=self._current_ifaces()),
                          lambda res, s=section, src=section_source:
                          self._on_rule_edited(s, src, res))
 
@@ -1390,7 +1441,8 @@ class FirewallApp(App):
         if kind == "rule":
             line = info[1]
             self.push_screen(RuleEditor(line.table, line.proto, line.value,
-                                        db=self.db),
+                                        db=self.db,
+                                        ifaces=self._current_ifaces()),
                              lambda res, ln=line: self._on_rule_edited_existing(ln, res))
 
     def _on_rule_edited_existing(self, line, result) -> None:
