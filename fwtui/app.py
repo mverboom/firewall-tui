@@ -2313,7 +2313,15 @@ class FirewallApp(App):
         host = os.path.join(self.fwdir, self.current_host)
         self.lines = []
         self._load_content_with_includes(result["content"], host, self.lines)
-        self.dirty = True
+        # dirty only if the loaded state differs from what is on disk
+        # (loading the working tree back should not leave unsaved changes)
+        try:
+            with open(host) as fh:
+                disk = fh.read()
+            self.dirty = (parser.serialize_rules(self.lines).rstrip("\n")
+                          != disk.rstrip("\n"))
+        except OSError:
+            self.dirty = True
         self._populate_rules()
         self._populate_global()
         self._update_status()
