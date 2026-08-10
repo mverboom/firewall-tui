@@ -136,7 +136,6 @@ Main views:
 | `esc` | back to the tab strip / top bar |
 | `up` `down` `pageup` `pagedown` `home` `end` | navigation |
 | `right` / `left` (top bar) | host selector <-> db button |
-| `enter` on a rule | open the rule editor (same as `e`) |
 
 Rule editor:
 
