@@ -538,11 +538,31 @@ class Prompt(ModalScreen):
         self.dismiss(None)
 
 
+class CommitSelect(NavSelect):
+    """NavSelect that announces a picked option even when it equals the
+    current value. The stock Select only posts Changed when the value
+    differs, so picking the already-selected option would otherwise close
+    the overlay but leave the modal open."""
+
+    class Commit(Message):
+        def __init__(self, value) -> None:
+            super().__init__()
+            self.value = value
+
+    def on_select_overlay_update_selection(self, event) -> None:
+        """An option was picked in the overlay: post Commit with its value.
+        Runs alongside Select's own handler (message.stop() only stops
+        bubbling to parents, not sibling handlers on the same widget)."""
+        value = self._options[event.option_index][1]
+        self.post_message(self.Commit(value))
+
+
 class SelectPrompt(ModalScreen):
     """Modal with a dropdown of valid options (for global settings).
 
     The dropdown opens immediately on mount (like the rule editor fields);
-    picking an option dismisses the modal right away. Escape cancels.
+    picking an option -- including the one already selected -- dismisses
+    the modal right away. Escape cancels.
     """
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
@@ -552,24 +572,19 @@ class SelectPrompt(ModalScreen):
         self._title = title
         self._options = options
         self._value = value
-        self._ready = False  # ignore the Changed posted at mount time
 
     def compose(self) -> ComposeResult:
         yield Static(self._title, classes="modal-title")
-        yield NavSelect(self._options, value=self._value, id="sel-option",
-                        classes="fselect -textual-compact", allow_blank=False)
+        yield CommitSelect(self._options, value=self._value, id="sel-option",
+                           classes="fselect -textual-compact", allow_blank=False)
 
     def on_mount(self) -> None:
-        sel = self.query_one("#sel-option", Select)
+        sel = self.query_one("#sel-option", CommitSelect)
         sel.add_class("-textual-compact")
         # open the dropdown immediately, like the rule editor fields
         self.call_after_refresh(sel.action_show_overlay)
 
-    def on_select_changed(self, event: Select.Changed) -> None:
-        if not self._ready:
-            # first Changed is the one posted during mount (initial value)
-            self._ready = True
-            return
+    def on_commit_select_commit(self, event) -> None:
         self.dismiss(event.value)
 
     def action_cancel(self) -> None:
@@ -1403,7 +1418,6 @@ class FirewallApp(App):
     def _on_global_kv_edit(self, old_key, kv) -> None:
         if not kv:
             return
-        self._snapshot()
         if "=" in kv:
             key, value = kv.split("=", 1)
             key, value = key.strip(), value.strip()
@@ -1412,6 +1426,9 @@ class FirewallApp(App):
             key, value = old_key, kv.strip()
         for l in self.lines:
             if l.kind == "global" and l.key == old_key:
+                if l.key == key and l.value == value:
+                    return  # no change (e.g. re-picked the current option)
+                self._snapshot()
                 l.key = key
                 l.value = value
                 l.raw = l.render()
