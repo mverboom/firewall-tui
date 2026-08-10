@@ -1907,6 +1907,11 @@ class FirewallApp(App):
                 return
         self._update_status()
 
+    def on_rules_view_widths_changed(self, event) -> None:
+        """Column widths changed: keep the header line in sync."""
+        self.query_one("#rules-header", Static).update(
+            header_text(event.widths))
+
 
 def main() -> None:
     # optional args: [config-file] [fwdir] [includedir]

@@ -38,11 +38,12 @@ INCLUDE_FG = "#e0af68"   # amber, for [#include] bars
 INCLUDE_BG = "#2a2f45"
 
 
-def header_text() -> str:
+def header_text(widths: list[int] | None = None) -> str:
     """The column header line (for the Static above the view)."""
+    widths = widths or COL_WIDTHS
     # joined with a space so columns always have a gap, even when a value
     # exactly fills its column width (e.g. "postrouting" = 10 in a 10-wide col)
-    return " ".join(c.ljust(w) for c, w in zip(COLUMNS, COL_WIDTHS))
+    return " ".join(c.ljust(w) for c, w in zip(COLUMNS, widths))
 
 
 class RulesView(Widget, can_focus=True):
@@ -91,6 +92,13 @@ class RulesView(Widget, can_focus=True):
     class SearchRequest(Message):
         """Posted when / is pressed (open the filter prompt)."""
 
+    class WidthsChanged(Message):
+        """Posted when the column widths change (keep the header in sync)."""
+
+        def __init__(self, widths: list[int]) -> None:
+            super().__init__()
+            self.widths = widths
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.all_rows: list[tuple] = []   # full row list from set_rows
@@ -100,6 +108,7 @@ class RulesView(Widget, can_focus=True):
         self.filter_text = ""
         self.selected = 0
         self.scroll = 0  # index of the first visible row
+        self.col_widths = list(COL_WIDTHS)  # dynamic, content-based
 
     # -- data --------------------------------------------------------------
     @staticmethod
@@ -163,6 +172,44 @@ class RulesView(Widget, can_focus=True):
                 self.rows.append(row)
         self.selected = min(self.selected, max(0, len(self.rows) - 1))
         self._ensure_visible()
+        self._recompute_widths()
+
+    # -- column widths -----------------------------------------------------
+    def _compute_widths(self) -> list[int]:
+        """Content-based column widths for the visible rows, shrunk to fit
+        the view width so no columns fall outside the window and no space
+        is wasted. The widest columns are shrunk first (min 3 chars)."""
+        width = self.size.width
+        if width <= 0:
+            return list(self.col_widths)
+        cw = [len(h) for h in COLUMNS]
+        for row in self.rows:
+            if row[0] not in ("rule", "implicit"):
+                continue
+            cols = row[-1]
+            for i, c in enumerate(COLUMNS):
+                cw[i] = max(cw[i], len(str(cols.get(c, "any"))))
+        spaces = len(COLUMNS) - 1
+        if sum(cw) + spaces <= width:
+            return cw
+        cw = list(cw)
+        while sum(cw) + spaces > width:
+            i = max(range(len(cw)), key=lambda i: cw[i])
+            if cw[i] <= 3:
+                break
+            cw[i] -= 1
+        return cw
+
+    def _recompute_widths(self) -> None:
+        """Recompute the column widths and announce changes (for the header)."""
+        new = self._compute_widths()
+        if new != self.col_widths:
+            self.col_widths = new
+            self.post_message(self.WidthsChanged(new))
+
+    def on_resize(self, event) -> None:
+        self._recompute_widths()
+        self.refresh()
 
     def expand_section(self, name: str) -> None:
         """Expand a collapsed section (used when adding a rule to it), plus
@@ -364,7 +411,7 @@ class RulesView(Widget, can_focus=True):
     def _render_rule(self, cols: dict, width: int, selected: bool,
                      implicit: bool) -> Strip:
         cells = []
-        for c, w in zip(COLUMNS, COL_WIDTHS):
+        for c, w in zip(COLUMNS, self.col_widths):
             val = str(cols.get(c, "any"))
             cells.append(val[:w].ljust(w))
         # join with a space so columns never run together
