@@ -1220,6 +1220,18 @@ class FirewallApp(App):
             self.rules_view.set_filter(text or "")
         self._update_status()
 
+    def on_db_view_search_request(self, event) -> None:
+        """/ pressed in the db view: open the filter prompt."""
+        current = self.db_view.filter_text if self.db_view else ""
+        self.push_screen(Prompt("Filter db (text; empty clears)",
+                                value=current),
+                         self._on_db_filter)
+
+    def _on_db_filter(self, text) -> None:
+        if self.db_view:
+            self.db_view.set_filter(text or "")
+        self._update_status()
+
     def on_nav_data_table_navigate_up(self, event) -> None:
         """Up at the top of a table (global/db): focus the menu."""
         self._focus_tabs()
@@ -1888,6 +1900,8 @@ class FirewallApp(App):
         filt = ""
         if self.rules_view and self.rules_view.filter_text:
             filt = f"  [filter: {self.rules_view.filter_text}]"
+        if self.db_view and self.db_view.filter_text:
+            filt += f"  [db filter: {self.db_view.filter_text}]"
         sb.update(
             f"a=add e=edit d=delete n=new section space=collapse c=collapse all "
             f"o=expand all enter=edit v=validate g=preview p=deploy i=git diff "

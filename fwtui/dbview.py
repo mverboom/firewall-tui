@@ -39,6 +39,7 @@ class DbView(Widget, can_focus=True):
         Binding("c", "collapse_all", "Collapse all", show=False),
         Binding("o", "expand_all", "Expand all", show=False),
         Binding("enter", "activate", "Edit", show=False),
+        Binding("/", "search", "Filter", show=False),
     ]
 
     class SelectionChanged(Message):
@@ -54,12 +55,16 @@ class DbView(Widget, can_focus=True):
     class NavigateUp(Message):
         pass
 
+    class SearchRequest(Message):
+        """Posted when / is pressed (open the filter prompt)."""
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.all_rows: list[tuple] = []
         self.rows: list[tuple] = []
         self.collapsed: set[str] = set()
         self._initialized = False
+        self.filter_text = ""
         self.selected = 0
         self.scroll = 0
 
@@ -79,16 +84,60 @@ class DbView(Widget, can_focus=True):
         self.post_message(self.SelectionChanged(0))
 
     def _rebuild_visible(self) -> None:
+        """Recompute visible rows. Collapsed sections hide their entries;
+        with a filter active, only matching sections are shown and their
+        matching entries are always visible (filter overrides collapse)."""
         self.rows = []
         hide = False
+        matching = self._matching_sections()
         for row in self.all_rows:
             if row[0] == "dbsection":
-                hide = row[1] in self.collapsed
-                self.rows.append(row)
+                if matching is not None:
+                    # filter active: keep only matching sections, show entries
+                    hide = row[1] not in matching
+                    if not hide:
+                        self.rows.append(row)
+                else:
+                    hide = row[1] in self.collapsed
+                    self.rows.append(row)
             elif not hide:
+                if matching is not None and not self._matches(row):
+                    continue
                 self.rows.append(row)
         self.selected = min(self.selected, max(0, len(self.rows) - 1))
         self._ensure_visible()
+
+    def set_filter(self, text: str) -> None:
+        """Filter the view to rows matching text (case-insensitive)."""
+        self.filter_text = text.strip().lower()
+        self._rebuild_visible()
+        self.refresh()
+
+    def _matches(self, row: tuple) -> bool:
+        """Match a section name or an entry key/value against the filter."""
+        if not self.filter_text:
+            return True
+        if row[0] == "dbsection":
+            return self.filter_text in row[1].lower()
+        if row[0] == "dbentry":
+            return (self.filter_text in row[1].lower()
+                    or self.filter_text in row[2].lower())
+        return True
+
+    def _matching_sections(self):
+        """Sections that match the filter or contain a matching entry."""
+        if not self.filter_text:
+            return None
+        result = set()
+        for row in self.all_rows:
+            if row[0] == "dbsection" and self._matches(row):
+                result.add(row[1])
+            if row[0] == "dbentry" and self._matches(row):
+                result.add(row[3])
+        return result
+
+    def action_search(self) -> None:
+        self.post_message(self.SearchRequest())
 
     def expand_section(self, name: str) -> None:
         self.collapsed.discard(name)
