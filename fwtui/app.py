@@ -1075,12 +1075,26 @@ class GitHistory(ModalScreen):
             return
         h, date, author, subject, a, r = self.commits[index]
         if not h:
-            self.notify("This is the current working tree", severity="warning")
+            # working tree: load the current disk state (e.g. to get back
+            # uncommitted changes after loading an older version)
+            self.app.push_screen(
+                ConfirmLoad("Load the current working tree?\n"
+                            "Current edits will be replaced (undo available)."),
+                lambda ok: self._do_load_working_tree() if ok else None)
             return
         self.app.push_screen(
             ConfirmLoad(f"Load version {h[:8]} ({subject})?\n"
                         "Current edits will be replaced (undo available)."),
             lambda ok: self._do_load(h) if ok else None)
+
+    def _do_load_working_tree(self) -> None:
+        try:
+            with open(self.file) as fh:
+                content = fh.read()
+        except OSError as e:
+            self.notify(f"Error reading file: {e}", severity="error")
+            return
+        self.dismiss({"commit": "working tree", "content": content})
 
     def _do_load(self, h: str) -> None:
         out, err = self._git("show", f"{h}:{self._repo_path()}")
@@ -2303,7 +2317,9 @@ class FirewallApp(App):
         self._populate_rules()
         self._populate_global()
         self._update_status()
-        self.notify(f"Loaded {result['commit'][:8]} - review and save (ctrl+s)")
+        label = (result["commit"] if result["commit"] == "working tree"
+                 else result["commit"][:8])
+        self.notify(f"Loaded {label} - review and save (ctrl+s)")
 
     def _load_content_with_includes(self, content: str, path: str,
                                     out: list) -> None:
