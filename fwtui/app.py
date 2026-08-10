@@ -86,10 +86,21 @@ class HostSelect(NavSelect):
 
 
 class NavDataTable(DataTable):
-    """DataTable that posts NavigateUp when up is pressed at the top row."""
+    """DataTable for the Global tab: posts NavigateUp at the top row and
+    Activate on enter (so enter works like 'e')."""
 
     class NavigateUp(Message):
         pass
+
+    class Activate(Message):
+        pass
+
+    BINDINGS = [
+        Binding("enter", "activate", "Edit", show=False),
+    ]
+
+    def action_activate(self) -> None:
+        self.post_message(self.Activate())
 
     def action_cursor_up(self) -> None:
         if self.cursor_row == 0:
@@ -528,7 +539,11 @@ class Prompt(ModalScreen):
 
 
 class SelectPrompt(ModalScreen):
-    """Modal with a dropdown of valid options (for global settings)."""
+    """Modal with a dropdown of valid options (for global settings).
+
+    The dropdown opens immediately on mount (like the rule editor fields);
+    picking an option dismisses the modal right away. Escape cancels.
+    """
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
@@ -537,23 +552,25 @@ class SelectPrompt(ModalScreen):
         self._title = title
         self._options = options
         self._value = value
+        self._ready = False  # ignore the Changed posted at mount time
 
     def compose(self) -> ComposeResult:
         yield Static(self._title, classes="modal-title")
         yield NavSelect(self._options, value=self._value, id="sel-option",
                         classes="fselect -textual-compact", allow_blank=False)
-        with Horizontal(id="modal-buttons"):
-            yield Button("OK", variant="primary", id="btn-ok")
-            yield Button("Cancel", id="btn-cancel")
 
     def on_mount(self) -> None:
-        self.query_one("#sel-option").add_class("-textual-compact")
+        sel = self.query_one("#sel-option", Select)
+        sel.add_class("-textual-compact")
+        # open the dropdown immediately, like the rule editor fields
+        self.call_after_refresh(sel.action_show_overlay)
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "btn-ok":
-            self.dismiss(self.query_one("#sel-option", Select).value)
-        elif event.button.id == "btn-cancel":
-            self.dismiss(None)
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if not self._ready:
+            # first Changed is the one posted during mount (initial value)
+            self._ready = True
+            return
+        self.dismiss(event.value)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -986,6 +1003,11 @@ class FirewallApp(App):
     def on_nav_data_table_navigate_up(self, event) -> None:
         """Up at the top of a table (global/db): focus the menu."""
         self._focus_tabs()
+
+    def on_nav_data_table_activate(self, event) -> None:
+        """Enter on a Global row: open the editor (same as 'e')."""
+        if self._active_tab() == "global":
+            self._edit_global()
 
     def on_db_view_activate(self, event) -> None:
         """Enter on a db row: edit the entry (like 'e')."""
