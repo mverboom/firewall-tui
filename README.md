@@ -132,7 +132,7 @@ Main views:
 | `ctrl+s` | save |
 | `ctrl+z` | undo |
 | `q` | quit (asks to confirm when there are unsaved changes) |
-| `/` | filter rules (empty clears) |
+| `/` | live filter (rules or db view): type to filter as you go; `enter` keeps the filter, `esc` clears it |
 | `space` | collapse / expand section |
 | `c` / `o` | collapse all / expand all |
 | `ctrl+up` / `ctrl+down` | move selected rule or section |

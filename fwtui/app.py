@@ -1210,6 +1210,8 @@ class FirewallApp(App):
     #main-area { height: 1fr; }
     #main-area.-db-mode #tabs { display: none; }
     #main-area.-db-mode #db-view { display: block; }
+    #filter-bar { display: none; height: 1; margin: 0 1; }
+    #filter-bar.-show { display: block; }
     #db-view { height: 1fr; display: none; }
     TabbedContent { height: 1fr; }
     DataTable { height: 1fr; }
@@ -1285,6 +1287,7 @@ class FirewallApp(App):
                              classes="topbar-select")
             yield Button("db", id="db-button", classes="topbar-btn")
         with Vertical(id="main-area"):
+            yield Input(placeholder="Filter...", id="filter-bar")
             with TabbedContent(id="tabs"):
                 with TabPane("Rules", id="tab-rules"):
                     yield Static("", id="rules-header", classes="colheader")
@@ -1303,6 +1306,7 @@ class FirewallApp(App):
         self.host_select = self.query_one("#host-select", Select)
         self.tabs = self.query_one("#tabs", TabbedContent)
         self.query_one("#rules-header", Static).update(header_text())
+        self.query_one("#filter-bar", Input).add_class("-textual-compact")
         gt = self.query_one("#global-table", DataTable)
         gt.add_column("Option", width=16)
         gt.add_column("value", width=40)
@@ -1550,7 +1554,11 @@ class FirewallApp(App):
         self.tabs.query_one(ContentTabs).focus()
 
     def _focus_content(self) -> None:
-        """Focus the content of the active tab."""
+        """Focus the content of the active tab (or the db view)."""
+        if self.db_mode:
+            if self.db_view:
+                self.db_view.focus()
+            return
         tab = self._active_tab()
         if tab == "rules":
             self.rules_view.focus()
@@ -1558,7 +1566,11 @@ class FirewallApp(App):
             self.query_one("#global-table", DataTable).focus()
 
     def action_focus_tabs(self) -> None:
-        """esc: back to the menu (top bar in db mode, tabs otherwise)."""
+        """esc: close the filter bar, else back to the menu (top bar in db
+        mode, tabs otherwise)."""
+        if self.focused is self.query_one("#filter-bar"):
+            self._hide_filter(clear=True)
+            return
         if self.db_mode:
             self.host_select.focus()
         else:
@@ -1587,28 +1599,53 @@ class FirewallApp(App):
         self._focus_tabs()
 
     def on_rules_view_search_request(self, event) -> None:
-        """/ pressed: open the filter prompt."""
-        current = self.rules_view.filter_text if self.rules_view else ""
-        self.push_screen(Prompt("Filter rules (text; empty clears)",
-                                value=current),
-                         self._on_filter)
-
-    def _on_filter(self, text) -> None:
-        if self.rules_view:
-            self.rules_view.set_filter(text or "")
-        self._update_status()
+        """/ pressed: show the live filter bar."""
+        self._show_filter()
 
     def on_db_view_search_request(self, event) -> None:
-        """/ pressed in the db view: open the filter prompt."""
-        current = self.db_view.filter_text if self.db_view else ""
-        self.push_screen(Prompt("Filter db (text; empty clears)",
-                                value=current),
-                         self._on_db_filter)
+        """/ pressed in the db view: show the live filter bar."""
+        self._show_filter()
 
-    def _on_db_filter(self, text) -> None:
-        if self.db_view:
-            self.db_view.set_filter(text or "")
+    def _show_filter(self) -> None:
+        """Show the filter bar, prefilled with the active view's filter."""
+        bar = self.query_one("#filter-bar", Input)
+        if self.db_mode:
+            current = self.db_view.filter_text if self.db_view else ""
+        else:
+            current = self.rules_view.filter_text if self.rules_view else ""
+        bar.value = current
+        bar.add_class("-show")
+        bar.focus()
+
+    def _hide_filter(self, clear: bool = True) -> None:
+        """Hide the filter bar; optionally clear the active filter."""
+        bar = self.query_one("#filter-bar", Input)
+        bar.remove_class("-show")
+        if clear:
+            if self.db_mode:
+                if self.db_view:
+                    self.db_view.set_filter("")
+            else:
+                if self.rules_view:
+                    self.rules_view.set_filter("")
         self._update_status()
+        self._focus_content()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        """Live filter as the user types."""
+        if event.input.id == "filter-bar":
+            if self.db_mode:
+                if self.db_view:
+                    self.db_view.set_filter(event.value)
+            else:
+                if self.rules_view:
+                    self.rules_view.set_filter(event.value)
+            self._update_status()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Enter in the filter bar: close it, keep the filter."""
+        if event.input.id == "filter-bar":
+            self._hide_filter(clear=False)
 
     def on_nav_data_table_navigate_up(self, event) -> None:
         """Up at the top of a table (global/db): focus the menu."""
@@ -2425,7 +2462,7 @@ class FirewallApp(App):
         sb.update(
             f"a=add e=edit d=delete n=new section space=collapse c=collapse all "
             f"o=expand all enter=edit v=validate g=preview p=deploy i=git history "
-            f"ctrl+z=undo ctrl+s=save q=quit   esc=menu{filt}")
+            f"/=filter ctrl+z=undo ctrl+s=save q=quit   esc=menu{filt}")
 
     def on_rules_view_selection_changed(self, event) -> None:
         """Show the raw rule text of the selected rule in the status bar."""
