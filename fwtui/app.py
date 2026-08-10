@@ -752,32 +752,60 @@ class ConfirmQuit(ModalScreen):
 # ---------------------------------------------------------------------------
 
 class ValidationReport(ModalScreen):
+    """Validation results; enter on an issue closes the window and jumps
+    to the rule it refers to."""
+
+    CSS = """
+    ValidationReport #report-list {
+        height: 20;
+    }
+    """
+
     BINDINGS = [Binding("escape", "close", "Close"), Binding("q", "close", "Close")]
 
     def __init__(self, issues) -> None:
         super().__init__()
         self.issues = issues
+        self.entries = list(self._entries())
+
+    def _entries(self):
+        """Yield (issue, level, message) for every error and warning."""
+        for i in self.issues:
+            for e in i.errors:
+                yield i, "ERROR", e
+            for w in i.warnings:
+                yield i, "WARN", w
 
     def compose(self) -> ComposeResult:
         n_err = sum(1 for i in self.issues for _ in i.errors)
         n_warn = sum(1 for i in self.issues for _ in i.warnings)
-        yield Static(
-            f"Validation: {n_err} error(s), {n_warn} warning(s)",
-            classes="modal-title")
-        yield TextArea(self._report_text(), read_only=True, id="report")
+        yield Static(f"Validation: {n_err} error(s), {n_warn} warning(s)",
+                     classes="modal-title")
+        items = [ListItem(Label(self._item_text(i, l, m)))
+                 for i, l, m in self.entries]
+        if not items:
+            items = [ListItem(Label("No issues found."))]
+        yield ListView(*items, id="report-list")
+        with Horizontal(id="modal-buttons"):
+            yield Button("Close", id="btn-close")
 
-    def _report_text(self) -> str:
-        if not self.issues:
-            return "No issues found."
-        out = []
-        for i in self.issues:
-            for e in i.errors:
-                out.append(f"ERROR [{i.section}] {i.table}{i.proto}: {i.text}")
-                out.append(f"       {e}")
-            for w in i.warnings:
-                out.append(f"WARN  [{i.section}] {i.table}{i.proto}: {i.text}")
-                out.append(f"       {w}")
-        return "\n".join(out)
+    def _item_text(self, issue, level, message) -> str:
+        if issue.text:
+            return (f"{level} [{issue.section}] {issue.table}{issue.proto}: "
+                    f"{issue.text}  --  {message}")
+        return f"{level} [{issue.section}]: {message}"
+
+    def on_list_view_selected(self, event) -> None:
+        """Enter on an issue: close and jump to its rule."""
+        index = event.list_view.index
+        if index is not None and index < len(self.entries):
+            self.dismiss(self.entries[index][0])
+        else:
+            self.dismiss(None)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-close":
+            self.dismiss(None)
 
     def action_close(self) -> None:
         self.dismiss(None)
@@ -1800,7 +1828,28 @@ class FirewallApp(App):
         if prowarns:
             from .expand import RuleIssue
             issues.append(RuleIssue("global", "", "", "", [], prowarns))
-        self.push_screen(ValidationReport(issues))
+        self.push_screen(ValidationReport(issues), self._on_validation_result)
+
+    def _on_validation_result(self, issue) -> None:
+        """After closing validation: jump to the rule an issue refers to."""
+        self.screen.refresh()  # defensive: modal pop can leave ghost content
+        if issue is None or not issue.text:
+            return
+        for l in self.lines:
+            if (l.kind == "rule" and l.value == issue.text
+                    and l.table == issue.table and l.proto == issue.proto):
+                self._jump_to_rule(l, issue.section)
+                break
+
+    def _jump_to_rule(self, line, section) -> None:
+        """Switch to the Rules tab and select the given rule line."""
+        self._set_db_mode(False)
+        self.query_one("#tabs", TabbedContent).active = "tab-rules"
+        if self.rules_view:
+            self.rules_view.set_filter("")  # clear any active filter
+            self.rules_view.expand_section(section)
+            self.rules_view.select_line(line)
+        self._focus_content()
 
     def action_preview(self) -> None:
         """Show the generated (expanded) iptables rules for this host."""
