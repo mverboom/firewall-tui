@@ -24,6 +24,7 @@ import sys
 
 from rich.markup import escape
 from rich.text import Text
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -33,6 +34,7 @@ from textual.widgets import (
     Button, DataTable, Footer, Header, Input, Label, ListItem, ListView,
     Select, Static, TabbedContent, TabPane, TextArea,
 )
+from textual.widgets._select import SelectOverlay
 from textual.widgets._tabbed_content import ContentTabs
 
 from . import columns, expand, implicit, parser
@@ -101,13 +103,29 @@ class NavSelect(Select, inherit_bindings=False):
 
 
 class HostSelect(NavSelect):
-    """Host selector: posts Focused so the app can leave db mode."""
+    """Host selector: type to search. Typing opens the dropdown and feeds
+    the key to its search, so printable keys search instead of triggering
+    app actions (a/e/d/v/...)."""
 
     class Focused(Message):
         pass
 
+    def __init__(self, *args, **kwargs) -> None:
+        kwargs["type_to_search"] = True
+        super().__init__(*args, **kwargs)
+
     def on_focus(self, event) -> None:
         self.post_message(self.Focused())
+
+    async def _on_key(self, event: events.Key) -> None:
+        if (event.character is not None and event.is_printable
+                and not self.expanded):
+            # typing searches: open the dropdown and feed the key to it
+            self.action_show_overlay()
+            await self.query_one(SelectOverlay)._on_key(event)
+            event.stop()
+            return
+        await super()._on_key(event)
 
 
 class NavDataTable(DataTable):
@@ -779,7 +797,7 @@ class PreviewRules(ModalScreen):
 
 
 # ---------------------------------------------------------------------------
-# generic output modal (deploy dry-run, git diff)
+# generic output modal (deploy, git diff)
 
 class OutputModal(ModalScreen):
     BINDINGS = [Binding("escape", "close", "Close"), Binding("q", "close", "Close")]
@@ -841,7 +859,7 @@ class FirewallApp(App):
         Binding("n", "new_section", "New section"),
         Binding("v", "validate", "Validate"),
         Binding("g", "preview", "Preview"),
-        Binding("p", "deploy", "Deploy (dry)"),
+        Binding("p", "deploy", "Deploy"),
         Binding("i", "git_diff", "Git diff"),
         Binding("ctrl+z", "undo", "Undo"),
         Binding("ctrl+s", "save", "Save"),
@@ -1729,14 +1747,16 @@ class FirewallApp(App):
         preview = expand.generate_preview(self.lines, self.db)
         self.push_screen(PreviewRules(preview))
 
-    # -- deploy (dry run) and git ------------------------------------------
+    # -- deploy and git ----------------------------------------------------
     def action_deploy(self) -> None:
-        """Run cdist config -n (dry run) for the current host in a worker."""
+        """Run the configured deploy command for the current host in a
+        worker (the command may be a real deploy or a dry run, depending on
+        the config)."""
         if not self.current_host:
             self.notify("Select a host first", severity="warning")
             return
         host = self.current_host
-        self.notify(f"Dry-run for {host}...")
+        self.notify(f"Deploying {host}...")
         self.run_worker(lambda: self._deploy_worker(host), exclusive=True,
                         thread=True)
 
@@ -1753,7 +1773,7 @@ class FirewallApp(App):
         except Exception as e:
             output = f"Error running deploy command: {e}"
         self.call_from_thread(self.push_screen,
-                              OutputModal(f"Dry-run {host}", output))
+                              OutputModal(f"Deploy {host}", output))
 
     def action_git_diff(self) -> None:
         """Show git diff for the current host's files (and include files)."""
