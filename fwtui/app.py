@@ -29,7 +29,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
-from textual.screen import ModalScreen
+from textual.screen import ModalScreen, Screen
 from textual.widgets import (
     Button, DataTable, Footer, Header, Input, Label, ListItem, ListView,
     Select, Static, TabbedContent, TabPane, TextArea,
@@ -680,6 +680,9 @@ class CommitSelect(NavSelect):
             super().__init__()
             self.value = value
 
+    class Cancel(Message):
+        pass
+
     def on_select_overlay_update_selection(self, event) -> None:
         """An option was picked in the overlay: post Commit with its value.
         Runs alongside Select's own handler (message.stop() only stops
@@ -687,36 +690,47 @@ class CommitSelect(NavSelect):
         value = self._options[event.option_index][1]
         self.post_message(self.Commit(value))
 
+    def on_select_overlay_dismiss(self, event) -> None:
+        """Escape on the open dropdown: cancel the whole modal (one press)."""
+        if not event.lost_focus:
+            self.post_message(self.Cancel())
+
 
 class SelectPrompt(ModalScreen):
-    """Modal with a dropdown of valid options (for global settings).
-
-    The dropdown opens immediately on mount (like the rule editor fields);
-    picking an option -- including the one already selected -- dismisses
-    the modal right away. Escape cancels.
-    """
+    """Dropdown of valid options (for global settings). Opens in place at
+    the edited row when a position is given; escape cancels in one press."""
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
-    def __init__(self, title: str, options: list, value: str = "") -> None:
+    def __init__(self, title: str, options: list, value: str = "",
+                 position: tuple[int, int] | None = None) -> None:
         super().__init__()
         self._title = title
         self._options = options
         self._value = value
+        self._position = position
 
     def compose(self) -> ComposeResult:
-        yield Static(self._title, classes="modal-title")
+        if not self._position:
+            yield Static(self._title, classes="modal-title")
         yield CommitSelect(self._options, value=self._value, id="sel-option",
                            classes="fselect -textual-compact", allow_blank=False)
 
     def on_mount(self) -> None:
         sel = self.query_one("#sel-option", CommitSelect)
         sel.add_class("-textual-compact")
+        if self._position:
+            x, y = self._position
+            sel.styles.offset = (x, y)
+            sel.styles.width = 20
         # open the dropdown immediately, like the rule editor fields
         self.call_after_refresh(sel.action_show_overlay)
 
     def on_commit_select_commit(self, event) -> None:
         self.dismiss(event.value)
+
+    def on_commit_select_cancel(self, event) -> None:
+        self.dismiss(None)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -1708,11 +1722,30 @@ class FirewallApp(App):
             opts = [(v, v) for v in GLOBAL_OPTIONS[key]]
             if value not in [v for _, v in opts]:
                 opts.append((value, value))  # e.g. the "(unset)" default
-            self.push_screen(SelectPrompt(f"Edit {key}", opts, value=value),
+            self.push_screen(SelectPrompt(f"Edit {key}", opts, value=value,
+                                          position=self._global_row_position(t)),
                              lambda res, k=key: self._on_global_kv_edit(k, res))
         else:
             self.push_screen(Prompt(f"Edit {key}", value=f"{key}={value}"),
                              lambda res, k=key: self._on_global_kv_edit(k, res))
+
+    def _global_row_position(self, table) -> tuple[int, int] | None:
+        """Screen position of the cursor row in the Global table, so the
+        choice dropdown can open in place."""
+        try:
+            row_index = table.cursor_coordinate[0]
+            region = table._get_row_region(row_index)
+            x, y = table.region.x, table.region.y
+            node = table.parent
+            while node is not None and not isinstance(node, Screen):
+                x += node.region.x
+                y += node.region.y
+                node = node.parent
+            y += region.y - int(table.scroll_y)
+            # land over the value column (key column is 16 wide + row label)
+            return (x + 18, y)
+        except Exception:
+            return None
 
     def _on_global_kv_edit(self, old_key, kv) -> None:
         if not kv:
