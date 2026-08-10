@@ -937,6 +937,201 @@ class DeployModal(ModalScreen):
         self.dismiss(None)
 
 
+class GitHistory(ModalScreen):
+    """Git history for the host's ruleset file: pick a commit, view its
+    diff (or full content) below, load that version (enter). Tab moves
+    between the list and the box; the box scrolls when focused."""
+
+    CSS = """
+    GitHistory #commit-list {
+        height: 1fr;
+    }
+    GitHistory #diff-view {
+        height: 1fr;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "close", "Close"),
+        Binding("q", "close", "Close"),
+        Binding("tab", "toggle_focus", "Toggle focus", show=False),
+        Binding("enter", "load_version", "Load version", show=False),
+        Binding("f", "toggle_view", "Diff/content", show=False),
+    ]
+
+    def __init__(self, host: str, fwdir: str) -> None:
+        super().__init__()
+        self.host = host
+        self.fwdir = fwdir
+        self.file = os.path.join(fwdir, host)
+        # (hash, date, author, subject, added, removed); hash "" = working tree
+        self.commits: list[list] = []
+        self._show_content = False
+
+    def compose(self) -> ComposeResult:
+        yield Static(f"Git history: {self.host}", classes="modal-title")
+        yield ListView(id="commit-list")
+        yield Static("", id="diff-title")
+        yield TextArea("", read_only=True, id="diff-view")
+        with Horizontal(id="modal-buttons"):
+            yield Button("Load version", id="btn-load")
+            yield Button("Close", id="btn-close")
+
+    def on_mount(self) -> None:
+        self._load_commits()
+        lv = self.query_one("#commit-list", ListView)
+        if lv.children:
+            lv.index = 0  # highlight the first entry (shows its diff)
+        lv.focus()
+
+    def _git(self, *args: str) -> tuple[str, str]:
+        import subprocess
+        try:
+            proc = subprocess.run(
+                ["git", "-C", self.fwdir, *args],
+                capture_output=True, text=True, timeout=30)
+            return proc.stdout, proc.stderr
+        except Exception as e:
+            return "", f"Error running git: {e}"
+
+    def _repo_path(self) -> str:
+        """The file path relative to the git repo root (for rev:path forms)."""
+        out, _ = self._git("rev-parse", "--show-toplevel")
+        root = out.strip()
+        if root:
+            return os.path.relpath(self.file, root)
+        return self.file
+
+    def _load_commits(self) -> None:
+        lv = self.query_one("#commit-list", ListView)
+        # working tree first (uncommitted changes)
+        lv.append(ListItem(Label("(working tree)")))
+        self.commits.append(["", "", "", "", 0, 0])
+        out, _ = self._git("log", "--numstat",
+                           "--format=%H%x09%ad%x09%an%x09%s",
+                           "--date=short", "--", self.file)
+        for line in out.strip().splitlines():
+            parts = line.split("\t")
+            if len(parts) == 4:
+                h, date, author, subject = parts
+                self.commits.append([h, date, author, subject, 0, 0])
+            elif len(parts) == 3 and parts[0].isdigit() \
+                    and parts[1].isdigit() and self.commits:
+                self.commits[-1][4] = int(parts[0])
+                self.commits[-1][5] = int(parts[1])
+        for i, c in enumerate(self.commits):
+            if not c[0]:
+                continue
+            h, date, author, subject, a, r = c
+            head = "  (HEAD)" if i == 1 else ""
+            lv.append(ListItem(Label(escape(
+                f"{date}  {h[:8]}  {subject}  +{a} -{r}{head}"))))
+
+    def on_list_view_highlighted(self, event) -> None:
+        """Selection moved: show the diff/content for that entry."""
+        index = event.list_view.index
+        if index is not None and index < len(self.commits):
+            self._show_diff(index)
+
+    def _show_diff(self, index: int) -> None:
+        h, date, author, subject, a, r = self.commits[index]
+        if not h:
+            out, err = self._git("diff", "--", self.file)
+            text = out or err or "(no changes)"
+            title = "working tree"
+        elif self._show_content:
+            out, err = self._git("show", f"{h}:{self._repo_path()}")
+            text = out or err
+            title = f"{h[:8]}  {date}  {author}  {subject}  [content]"
+        else:
+            out, err = self._git("show", h, "--", self.file)
+            text = out or err
+            title = f"{h[:8]}  {date}  {author}  {subject}  (+{a} -{r})"
+        self.query_one("#diff-title", Static).update(escape(title))
+        self.query_one("#diff-view", TextArea).text = text
+
+    def action_toggle_view(self) -> None:
+        """f: toggle the bottom box between diff and full file content."""
+        self._show_content = not self._show_content
+        lv = self.query_one("#commit-list", ListView)
+        index = lv.index
+        if index is not None and index < len(self.commits):
+            self._show_diff(index)
+
+    def on_list_view_selected(self, event) -> None:
+        """Enter/click on a commit: load that version."""
+        self.action_load_version()
+
+    def action_load_version(self) -> None:
+        lv = self.query_one("#commit-list", ListView)
+        index = lv.index
+        if index is None or index >= len(self.commits):
+            return
+        h, date, author, subject, a, r = self.commits[index]
+        if not h:
+            self.notify("This is the current working tree", severity="warning")
+            return
+        self.app.push_screen(
+            ConfirmLoad(f"Load version {h[:8]} ({subject})?\n"
+                        "Current edits will be replaced (undo available)."),
+            lambda ok: self._do_load(h) if ok else None)
+
+    def _do_load(self, h: str) -> None:
+        out, err = self._git("show", f"{h}:{self._repo_path()}")
+        if err:
+            self.notify(err.strip(), severity="error")
+            return
+        self.dismiss({"commit": h, "content": out})
+
+    def action_toggle_focus(self) -> None:
+        """Tab: move between the commit list and the diff view."""
+        if self.focused is self.query_one("#commit-list"):
+            self.query_one("#diff-view", TextArea).focus()
+        else:
+            self.query_one("#commit-list", ListView).focus()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-load":
+            self.action_load_version()
+        elif event.button.id == "btn-close":
+            self.dismiss(None)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
+class ConfirmLoad(ModalScreen):
+    """Confirm loading a git version (replaces the current ruleset)."""
+
+    BINDINGS = [
+        Binding("escape", "no", "Cancel"),
+        Binding("y", "yes", "Load"),
+        Binding("n", "no", "Cancel"),
+    ]
+
+    def __init__(self, title: str) -> None:
+        super().__init__()
+        self._title = title
+
+    def compose(self) -> ComposeResult:
+        yield Static(self._title, classes="modal-title")
+        with Horizontal(id="modal-buttons"):
+            yield Button("Load", variant="primary", id="btn-load")
+            yield Button("Cancel", id="btn-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-load":
+            self.dismiss(True)
+        elif event.button.id == "btn-cancel":
+            self.dismiss(False)
+
+    def action_yes(self) -> None:
+        self.dismiss(True)
+
+    def action_no(self) -> None:
+        self.dismiss(False)
+
+
 # ---------------------------------------------------------------------------
 # main app
 # ---------------------------------------------------------------------------
@@ -2069,23 +2264,41 @@ class FirewallApp(App):
             modal.append(f"\nError running deploy command: {e}")
 
     def action_git_diff(self) -> None:
-        """Show git diff for the current host's files (and include files)."""
+        """Show the git history for the current host's ruleset: pick a
+        commit, view its diff, load that version."""
         if not self.current_host:
             self.notify("Select a host first", severity="warning")
             return
-        import subprocess
-        files = [os.path.join(self.fwdir, self.current_host)]
-        for l in self.lines:
-            if l.source and l.source not in files:
-                files.append(l.source)
-        try:
-            proc = subprocess.run(
-                ["git", "-C", self.fwdir, "diff", "--"] + files,
-                capture_output=True, text=True, timeout=30)
-            output = proc.stdout or "(no changes)"
-        except Exception as e:
-            output = f"Error running git: {e}"
-        self.push_screen(OutputModal("Git diff", output))
+        self.push_screen(GitHistory(self.current_host, self.fwdir),
+                         self._on_git_history_load)
+
+    def _on_git_history_load(self, result) -> None:
+        """Load a git version of the host file into the editor."""
+        if not result:
+            return
+        self._snapshot()
+        host = os.path.join(self.fwdir, self.current_host)
+        self.lines = []
+        self._load_content_with_includes(result["content"], host, self.lines)
+        self.dirty = True
+        self._populate_rules()
+        self._populate_global()
+        self._update_status()
+        self.notify(f"Loaded {result['commit'][:8]} - review and save (ctrl+s)")
+
+    def _load_content_with_includes(self, content: str, path: str,
+                                    out: list) -> None:
+        """Like _load_with_includes but from in-memory content (for loading
+        a git version of the host file; include files stay current)."""
+        for l in parser.parse_rules(content):
+            l.source = path
+            if l.kind == "include":
+                out.append(l)
+                inc_path = os.path.join(self.includedir, l.name)
+                if os.path.isfile(inc_path):
+                    self._load_with_includes(inc_path, out)
+            else:
+                out.append(l)
 
     def action_save(self) -> None:
         if self.db_mode or self.current_host is None:
@@ -2116,7 +2329,7 @@ class FirewallApp(App):
             filt += f"  [db filter: {self.db_view.filter_text}]"
         sb.update(
             f"a=add e=edit d=delete n=new section space=collapse c=collapse all "
-            f"o=expand all enter=edit v=validate g=preview p=deploy i=git diff "
+            f"o=expand all enter=edit v=validate g=preview p=deploy i=git history "
             f"ctrl+z=undo ctrl+s=save q=quit   esc=menu{filt}")
 
     def on_rules_view_selection_changed(self, event) -> None:

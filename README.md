@@ -41,8 +41,9 @@ Documentation:
 - **Preview** (`g`): shows the generated iptables rules per proto
 - **Deploy** (`p`): runs a configurable deploy command for the current host
   in a background worker (see "Deploy command" below)
-- **Git diff** (`i`): `git diff` for the current host's files (including
-  include files)
+- **Git history** (`i`): browse the host ruleset's git history — each
+  commit with its diffstat, the diff (or full file content, `f`) below,
+  and load any version (enter, with confirmation)
 - **Undo** (ctrl+z, 50 snapshots), **search/filter** (`/`), **save** (ctrl+s)
 
 ## Requirements
@@ -127,7 +128,7 @@ Main views:
 | `v` | validate current ruleset |
 | `g` | show generated-rules preview |
 | `p` | run the deploy command (see warning below) |
-| `i` | git diff of the current host's files |
+| `i` | git history: browse commits, view diffs, load a version |
 | `ctrl+s` | save |
 | `ctrl+z` | undo |
 | `q` | quit (asks to confirm when there are unsaved changes) |
@@ -157,7 +158,7 @@ Rule editor:
 3. `v` to validate the whole ruleset against the db.
 4. `g` to inspect the rules the manifest would generate.
 5. `ctrl+s` to write the files (round-trip: comments/order preserved).
-6. `i` to review the changes as a git diff, `p` to deploy.
+6. `i` to browse the git history (diffs per commit, load a version), `p` to deploy.
 
 ### Deploy command — dry run vs. real deploy
 
@@ -195,7 +196,7 @@ firewall-tui.conf  default configuration
 - Per-user config: `/home/cdist/.firewall-tui.conf` (overrides
   `deploy_command` to `runcdist -o firewall {host}`)
 - Data: `/home/cdist/config/files/firewall/` (rulesets + `db`), the config
-  repo is a git repo, so `i` (git diff) and `ctrl+s` interact with it.
+  repo is a git repo, so `i` (git history) and `ctrl+s` interact with it.
 
 ## Development notes
 
