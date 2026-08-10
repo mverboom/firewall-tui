@@ -187,6 +187,8 @@ firewall-tui.conf  default configuration
 ## Deployment on the cdist server
 
 - Repository: `/home/cdist/firewall-tui` (git, same remote as this repo)
+- Convenience symlink: `/home/cdist/bin/firewall-tui -> ../firewall-tui/firewall-tui`
+  (the launcher resolves symlinks itself, so it can be run from anywhere)
 - venv: `/home/cdist/firewall-tui/venv` (textual 8.2.8)
 - Per-user config: `/home/cdist/.firewall-tui.conf` (overrides
   `deploy_command` to `runcdist -o firewall {host}`)
