@@ -78,6 +78,7 @@ Configuration is read from an INI file. Lookup order:
 | `includedir` | `dir` | directory for `[#include]` files |
 | `db` | `dir/db` | path to the shared db file |
 | `explore_dir` | *(empty)* | directory with the last explorer data per host (e.g. `/home/cdist/explore`); when set, the rule editor shows a dropdown of the host's interfaces (from `<explore_dir>/<host>/interfaces`) for the Iface field, with a `(custom ...)` entry for arbitrary values |
+| `firewall_type` | `/home/cdist/files.external/cdist-types.git/__firewall` | directory of the `__firewall` cdist type; the `g` preview runs its manifest in generate-only mode (`FWTUI_GENERATE`) so the preview shows exactly what the type would deploy |
 | `deploy_command` | `cdist config -n -c /home/cdist/config {host}` | command run by `p`; `{host}` is replaced with the hostname |
 
 `[environment]` section: environment variables exported for the deploy

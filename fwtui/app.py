@@ -871,31 +871,6 @@ class ValidationReport(ModalScreen):
 
 
 # ---------------------------------------------------------------------------
-# generated-rules preview modal
-
-class PreviewRules(ModalScreen):
-    BINDINGS = [Binding("escape", "close", "Close"), Binding("q", "close", "Close")]
-
-    def __init__(self, preview: dict) -> None:
-        super().__init__()
-        self.preview = preview
-
-    def compose(self) -> ComposeResult:
-        yield Static("Generated rules (preview)", classes="modal-title")
-        yield TextArea(self._report_text(), read_only=True, id="report")
-
-    def _report_text(self) -> str:
-        parts = []
-        for p in sorted(self.preview):
-            parts.append(f"=== IPv{p} ===")
-            parts.extend(self.preview[p])
-        return "\n".join(parts)
-
-    def action_close(self) -> None:
-        self.dismiss(None)
-
-
-# ---------------------------------------------------------------------------
 # generic output modal (deploy, git diff)
 
 class OutputModal(ModalScreen):
@@ -1019,6 +994,7 @@ class FirewallApp(App):
         self.deploy_command = fw["deploy_command"]
         self.deploy_env = cfg["env"]
         self.explore_dir = fw["explore_dir"]
+        self.firewall_type = fw["firewall_type"]
         self.hosts: list[str] = []
         self.lines: list[parser.Line] = []
         self.dblines: list[parser.DbLine] = []
@@ -1958,12 +1934,84 @@ class FirewallApp(App):
         self._focus_content()
 
     def action_preview(self) -> None:
-        """Show the generated (expanded) iptables rules for this host."""
+        """Show exactly what the __firewall type would generate for this
+        host, by running its manifest in generate-only mode (FWTUI_GENERATE)."""
         if not self.current_host:
             self.notify("Select a host ruleset to preview", severity="warning")
             return
-        preview = expand.generate_preview(self.lines, self.db)
-        self.push_screen(PreviewRules(preview))
+        host = self.current_host
+        modal = DeployModal(f"Preview {host}")
+        self.push_screen(modal)
+        self.run_worker(self._preview_worker(host, modal), exclusive=True)
+
+    async def _preview_worker(self, host: str, modal: DeployModal) -> None:
+        """Run the type's manifest in generate-only mode (with a stubbed
+        cdist object/global layout) and show the generated restore files."""
+        import asyncio
+        import shutil
+        import tempfile
+        # wait until the modal is mounted so early output is not lost
+        while not modal.is_mounted:
+            await asyncio.sleep(0.01)
+        manifest = os.path.join(self.firewall_type, "manifest")
+        if not os.path.isfile(manifest):
+            modal.append(f"firewall type manifest not found: {manifest}\n")
+            return
+        objdir = tempfile.mkdtemp(prefix="fwtui-object-")
+        globaldir = tempfile.mkdtemp(prefix="fwtui-global-")
+        outdir = tempfile.mkdtemp(prefix="fwtui-preview-")
+        try:
+            # stub the cdist object/global layout the manifest reads
+            paramdir = os.path.join(objdir, "parameter")
+            os.makedirs(paramdir)
+            with open(os.path.join(paramdir, "rules"), "w") as fh:
+                fh.write(os.path.join(self.fwdir, host))
+            if os.path.exists(self.db_path):
+                with open(os.path.join(paramdir, "db"), "w") as fh:
+                    fh.write(self.db_path)
+            if self.includedir:
+                with open(os.path.join(paramdir, "includedir"), "w") as fh:
+                    fh.write(self.includedir)
+            open(os.path.join(paramdir, "state"), "w").close()
+            os.makedirs(os.path.join(globaldir, "explorer"))
+            osfile = os.path.join(self.explore_dir, host, "os")
+            if os.path.exists(osfile):
+                shutil.copy(osfile, os.path.join(globaldir, "explorer", "os"))
+            else:
+                open(os.path.join(globaldir, "explorer", "os"), "w").close()
+            env = os.environ.copy()
+            env.update({
+                "__target_host": host,
+                "__type": self.firewall_type,
+                "__object": objdir,
+                "__global": globaldir,
+                "FWTUI_GENERATE": outdir,
+            })
+            modal.append(f"$ {manifest} (generate-only for {host})\n")
+            proc = await asyncio.create_subprocess_exec(
+                "bash", manifest, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT, env=env)
+            while True:
+                line = await proc.stdout.readline()
+                if not line:
+                    break
+                modal.append(line.decode(errors="replace"))
+            rc = await proc.wait()
+            if rc != 0:
+                modal.append(f"\n[generation failed, exit code {rc}]\n")
+            files = sorted(f for f in os.listdir(outdir)
+                           if not f.startswith("."))
+            if files:
+                for f in files:
+                    with open(os.path.join(outdir, f)) as fh:
+                        modal.append(f"\n=== {f} ===\n")
+                        modal.append(fh.read())
+            else:
+                modal.append("\n(no rules generated)\n")
+        finally:
+            shutil.rmtree(objdir, ignore_errors=True)
+            shutil.rmtree(globaldir, ignore_errors=True)
+            shutil.rmtree(outdir, ignore_errors=True)
 
     # -- deploy and git ----------------------------------------------------
     def action_deploy(self) -> None:
