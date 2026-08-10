@@ -85,17 +85,19 @@ class DbView(Widget, can_focus=True):
 
     def _rebuild_visible(self) -> None:
         """Recompute visible rows. Collapsed sections hide their entries;
-        with a filter active, only matching sections are shown and their
-        matching entries are always visible (filter overrides collapse)."""
+        with a filter active, only matching sections are shown, but the
+        collapsed state still applies to their entries."""
         self.rows = []
         hide = False
         matching = self._matching_sections()
         for row in self.all_rows:
             if row[0] == "dbsection":
                 if matching is not None:
-                    # filter active: keep only matching sections, show entries
-                    hide = row[1] not in matching
-                    if not hide:
+                    # filter active: keep only matching sections; the
+                    # collapsed state still hides their entries
+                    in_matching = row[1] in matching
+                    hide = (not in_matching) or (row[1] in self.collapsed)
+                    if in_matching:
                         self.rows.append(row)
                 else:
                     hide = row[1] in self.collapsed
@@ -108,8 +110,14 @@ class DbView(Widget, can_focus=True):
         self._ensure_visible()
 
     def set_filter(self, text: str) -> None:
-        """Filter the view to rows matching text (case-insensitive)."""
+        """Filter the view to rows matching text (case-insensitive).
+        Matching sections are auto-expanded so the matches are visible;
+        they can still be collapsed afterwards."""
         self.filter_text = text.strip().lower()
+        if self.filter_text:
+            matching = self._matching_sections()
+            if matching:
+                self.collapsed -= matching
         self._rebuild_visible()
         self.refresh()
 
