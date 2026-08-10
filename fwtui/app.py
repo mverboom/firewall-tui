@@ -767,6 +767,37 @@ class SelectPrompt(ModalScreen):
 # ---------------------------------------------------------------------------
 # unsaved-changes confirmation modal
 
+class ConfirmSwitch(ModalScreen):
+    """Confirm switching host with unsaved changes (current host edits
+    would be lost; db edits are shared and persist)."""
+
+    BINDINGS = [
+        Binding("escape", "no", "Cancel"),
+        Binding("y", "yes", "Switch"),
+        Binding("n", "no", "Cancel"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        yield Static("Unsaved changes - switch host?\n"
+                     "The current host's edits will be lost.",
+                     classes="modal-title")
+        with Horizontal(id="modal-buttons"):
+            yield Button("Switch", variant="error", id="btn-switch")
+            yield Button("Cancel", id="btn-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-switch":
+            self.dismiss(True)
+        elif event.button.id == "btn-cancel":
+            self.dismiss(False)
+
+    def action_yes(self) -> None:
+        self.dismiss(True)
+
+    def action_no(self) -> None:
+        self.dismiss(False)
+
+
 class ConfirmQuit(ModalScreen):
     """Unsaved-changes confirmation, shown as a prominent centered dialog."""
 
@@ -1244,6 +1275,7 @@ class FirewallApp(App):
         self.dirty = False
         self.undo_stack: list = []
         self.db_mode = False
+        self._pending_host: str | None = None
 
     # -- setup -------------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -1456,9 +1488,29 @@ class FirewallApp(App):
         if event.select.id == "host-select":
             if event.value is Select.NULL or not event.value:
                 return  # placeholder/blank selection: ignore
-            self._set_db_mode(False)
-            self._load_ruleset(event.value)
-            self.query_one("#tabs", TabbedContent).active = "tab-rules"
+            if event.value == self.current_host:
+                return  # re-selected the current host (e.g. after a
+                        # cancelled switch): do not reload it
+            if self.dirty:
+                # confirm before discarding the current host's edits
+                self._pending_host = event.value
+                self.push_screen(ConfirmSwitch(), self._on_switch_confirm)
+                return
+            self._switch_host(event.value)
+
+    def _switch_host(self, host: str) -> None:
+        self._set_db_mode(False)
+        self._load_ruleset(host)
+        self.query_one("#tabs", TabbedContent).active = "tab-rules"
+
+    def _on_switch_confirm(self, result) -> None:
+        if result:
+            self._switch_host(self._pending_host)
+        else:
+            # revert the selector to the current host; on_select_changed
+            # ignores the re-selection (value == current_host), so the
+            # unsaved edits are preserved
+            self.host_select.value = self.current_host
 
     def _active_tab(self) -> str:
         tab = self.query_one("#tabs", TabbedContent).active or ""
