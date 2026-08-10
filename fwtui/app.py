@@ -132,6 +132,9 @@ CHAINS = [
 
 PROTOS = [("both (46)", "46"), ("IPv4", "4"), ("IPv6", "6")]
 
+# Sentinel value for the "(custom ...)" option in the Source/Dest dropdowns
+CUSTOM = "__custom__"
+
 
 def build_rule(chain: str, iface: str, src: str, dst: str, svc: str,
                action: str, to: str, extra: str) -> str:
@@ -190,7 +193,9 @@ class RuleEditor(ModalScreen):
         self.networkgroups = list(self.db.networkgroups)
 
     def _source_options(self) -> list:
-        """Options for the Source/Dest fields: db hosts, networks, groups."""
+        """Options for the Source/Dest fields: db hosts, networks, groups,
+        plus an explicit (custom ...) entry so raw values (plain IPs etc.)
+        are known to be allowed."""
         opts = [("(any)", "")]
         for h in self.hosts:
             opts.append((f"host({h})", f"host({h})"))
@@ -200,17 +205,24 @@ class RuleEditor(ModalScreen):
             opts.append((f"hostgroup({g})", f"hostgroup({g})"))
         for g in self.networkgroups:
             opts.append((f"networkgroup({g})", f"networkgroup({g})"))
+        opts.append(("(custom ...)", CUSTOM))
         return opts
 
     def _set_select_value(self, sel: Select, value: str) -> None:
         """Set a Select's value, adding it as an option if not present (so
-        raw values like IPs or hosts(a,b) are preserved on rebuild)."""
+        raw values like IPs or hosts(a,b) are preserved on rebuild). New
+        values are inserted before the (custom ...) sentinel so that entry
+        always stays last."""
         if not value:
             sel.value = ""
             return
         values = [v for _, v in sel._options]
         if value not in values:
-            sel.set_options(list(sel._options) + [(value, value)])
+            opts = list(sel._options)
+            custom_idx = next(
+                (i for i, (p, v) in enumerate(opts) if v == CUSTOM), len(opts))
+            opts.insert(custom_idx, (value, value))
+            sel.set_options(opts)
         sel.value = value
 
     def _row(self, label: str, widget, classes: str = "") -> Horizontal:
@@ -263,6 +275,9 @@ class RuleEditor(ModalScreen):
                 yield self._row("Extra", Input(
                     placeholder="e.g. -m limit --limit 10/min", id="f-extra",
                     classes="finput -textual-compact"))
+                yield Label(
+                    "Source/Dest: pick a db entry, or '(custom ...)' for any "
+                    "IP/address", classes="fhint")
             with Vertical(id="rawcol"):
                 yield Label("Raw rule text (authoritative)", classes="frow")
                 yield TextArea(self.text, id="f-raw")
@@ -370,11 +385,46 @@ class RuleEditor(ModalScreen):
     def on_select_changed(self, event: Select.Changed) -> None:
         if self._syncing:
             return
+        if event.value == CUSTOM and event.select.id in ("f-src", "f-dst"):
+            # "(custom ...)": ask for a raw value; do NOT rebuild the raw
+            # text with the sentinel (it still holds the previous value)
+            self._open_custom_value(event.select.id)
+            return
         if event.select.id in ("f-chain", "f-action", "f-svc",
                                "f-to-host", "f-to-svc", "f-src", "f-dst"):
             self._rebuild_raw()
         if event.select.id == "f-action":
             self._update_nat_rows()
+
+    def _open_custom_value(self, wid: str) -> None:
+        """'(custom ...)' picked in Source/Dest: prompt for any raw value."""
+        label = "Source" if wid == "f-src" else "Dest"
+        self.app.push_screen(
+            Prompt(f"{label} value (db entry or raw IP/address)",
+                   value=self._current_field_value(wid),
+                   placeholder="e.g. 192.168.1.77, host(x), network(y)"),
+            lambda res, w=wid: self._on_custom_value(w, res))
+
+    def _current_field_value(self, wid: str) -> str:
+        """The value the field had before '(custom ...)' was picked: the raw
+        text is untouched at this point, so parse it."""
+        import re
+        raw = self.query_one("#f-raw", TextArea).text
+        if wid == "f-src":
+            m = re.search(r"-s\s+(\S+)", raw)
+        else:
+            m = (re.search(r"--destination\s+(\S+)", raw)
+                 or re.search(r"-d\s+(\S+)", raw))
+        return m.group(1) if m else ""
+
+    def _on_custom_value(self, wid: str, res) -> None:
+        """Apply the custom value, or restore the previous one on cancel."""
+        sel = self.query_one(f"#{wid}", Select)
+        value = (res or "").strip()
+        if not value:
+            self._set_select_value(sel, self._current_field_value(wid))
+            return
+        self._set_select_value(sel, value)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-save":
@@ -439,8 +489,8 @@ class RuleEditor(ModalScreen):
             sel = self.query_one(wid, Select)
             cur = sel.value
             sel.set_options(self._source_options())
-            if cur in [v for _, v in sel._options]:
-                sel.value = cur
+            # re-add raw values (plain IPs etc.) that are not db entries
+            self._set_select_value(sel, cur)
 
     # -- form navigation ----------------------------------------------------
     FIELD_IDS = ("f-table", "f-proto", "f-chain", "f-iface", "f-src",
@@ -746,6 +796,7 @@ class FirewallApp(App):
     #builder { width: 55%; }
     #rawcol { width: 45%; }
     .frow { height: 1; margin: 0 0 1 1; }
+    .fhint { margin: 0 0 1 1; text-style: dim; }
     .natrow { display: none; }
     .natrow.-show { display: block; }
     .flabel { width: 22; padding: 0 1 0 0; }
