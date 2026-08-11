@@ -35,6 +35,14 @@ class DbView(Widget, can_focus=True):
         Binding("pagedown", "move(10)", "Page down", show=False),
         Binding("home", "move(-100000)", "Top", show=False),
         Binding("end", "move(100000)", "Bottom", show=False),
+        # vi-style navigation (arrow keys still work)
+        Binding("j", "move(1)", "Down", show=False),
+        Binding("k", "move(-1)", "Up", show=False),
+        Binding("G", "move(100000)", "Bottom", show=False),
+        Binding("ctrl+d", "move_half_page(1)", "Half page down", show=False),
+        Binding("ctrl+u", "move_half_page(-1)", "Half page up", show=False),
+        Binding("ctrl+f", "move_page(1)", "Page down", show=False),
+        Binding("ctrl+b", "move_page(-1)", "Page up", show=False),
         Binding("space", "toggle_collapse", "Collapse/expand", show=False),
         Binding("c", "collapse_all", "Collapse all", show=False),
         Binding("o", "expand_all", "Expand all", show=False),
@@ -164,6 +172,14 @@ class DbView(Widget, can_focus=True):
         self._ensure_visible()
         self.refresh()
         self.post_message(self.SelectionChanged(self.selected))
+
+    def action_move_page(self, delta: int) -> None:
+        """ctrl+f/ctrl+b: move a full viewport."""
+        self.action_move(delta * max(1, self.size.height))
+
+    def action_move_half_page(self, delta: int) -> None:
+        """ctrl+d/ctrl+u: move half a viewport."""
+        self.action_move(delta * max(1, self.size.height // 2))
 
     def action_toggle_collapse(self) -> None:
         if not self.rows:

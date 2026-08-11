@@ -145,7 +145,8 @@ class HostSelect(NavSelect):
 
 class NavDataTable(DataTable):
     """DataTable for the Global tab: posts NavigateUp at the top row and
-    Activate on enter (so enter works like 'e')."""
+    Activate on enter (so enter works like 'e'). Also accepts vi-style
+    navigation (j/k/G/ctrl+d/u/f/b)."""
 
     class NavigateUp(Message):
         pass
@@ -155,10 +156,23 @@ class NavDataTable(DataTable):
 
     BINDINGS = [
         Binding("enter", "activate", "Edit", show=False),
+        # vi-style navigation (arrow keys still work)
+        Binding("j", "cursor_down", "Down", show=False),
+        Binding("k", "cursor_up", "Up", show=False),
+        Binding("G", "go_bottom", "Bottom", show=False),
+        Binding("ctrl+d", "page_down", "Page down", show=False),
+        Binding("ctrl+u", "page_up", "Page up", show=False),
+        Binding("ctrl+f", "page_down", "Page down", show=False),
+        Binding("ctrl+b", "page_up", "Page up", show=False),
     ]
 
     def action_activate(self) -> None:
         self.post_message(self.Activate())
+
+    def action_go_bottom(self) -> None:
+        """G: move the cursor to the last row."""
+        if self.row_count:
+            self.move_cursor(row=self.row_count - 1)
 
     def action_cursor_up(self) -> None:
         if self.cursor_row == 0:
@@ -1668,6 +1682,23 @@ class FirewallApp(App):
         switching tabs."""
         focused = self.focused
         if isinstance(focused, ContentTabs):
+            # vi-style navigation on the tab strip
+            if event.key == "h":
+                focused.action_previous_tab()
+                event.stop()
+                return
+            if event.key == "l":
+                focused.action_next_tab()
+                event.stop()
+                return
+            if event.key == "j":
+                self._focus_content()
+                event.stop()
+                return
+            if event.key == "k":
+                self.host_select.focus()
+                event.stop()
+                return
             view = self._active_rules_view()
             if view is not None:
                 if event.key == "o":

@@ -150,6 +150,11 @@ Main views:
 | `ctrl+up` / `ctrl+down` | move selected rule or section |
 | `esc` | back to the tab strip / top bar |
 | `up` `down` `pageup` `pagedown` `home` `end` | navigation |
+| `j` `k` | down / up (vi-style; also on the tab strip: `j` enters the content, `k` back to the host selector) |
+| `h` `l` | previous / next tab (on the tab strip) |
+| `G` | jump to the bottom (list views and Global table) |
+| `ctrl+d` / `ctrl+u` | half page down / up (list views) |
+| `ctrl+f` / `ctrl+b` | page down / up (list views) |
 | `right` / `left` (top bar) | host selector <-> db button |
 
 Rule editor:
