@@ -28,7 +28,7 @@ DEFAULTS = {
     # directory with the last explorer data per host (enables the interface
     # dropdown in the rule editor); empty = feature off
     "explore_dir": "",
-    # __firewall type directory; the 'g' preview runs its manifest in
+    # __firewall type directory; the 'p' preview runs its manifest in
     # generate-only mode (FWTUI_GENERATE) for authoritative output
     "firewall_type": "/home/cdist/files.external/cdist-types.git/__firewall",
 }

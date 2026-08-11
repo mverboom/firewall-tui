@@ -1322,6 +1322,86 @@ class ConfirmLoad(ModalScreen):
         self.dismiss(False)
 
 
+class CommitModal(ModalScreen):
+    """Optional git commit after saving: enter a message and commit the
+    changed files (or skip)."""
+
+    BINDINGS = [
+        Binding("escape", "skip", "Skip"),
+        Binding("ctrl+s", "commit", "Commit", show=False),
+    ]
+
+    def __init__(self, files: list[str], fwdir: str) -> None:
+        super().__init__()
+        self.files = files
+        self.fwdir = fwdir
+
+    def compose(self) -> ComposeResult:
+        yield Static("Commit changes to git?", classes="modal-title")
+        yield Static("\n".join(f"  {escape(f)}" for f in self.files))
+        yield Input(placeholder="Commit message", id="commit-msg")
+        with Horizontal(id="modal-buttons"):
+            yield Button("Commit", variant="primary", id="btn-commit")
+            yield Button("Skip", id="btn-skip")
+        yield Static("enter: commit   esc: skip", id="commit-hint")
+
+    def on_mount(self) -> None:
+        self.query_one("#commit-msg", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "commit-msg":
+            self.action_commit()
+
+    def action_commit(self) -> None:
+        msg = self.query_one("#commit-msg", Input).value.strip()
+        if not msg:
+            self.notify("Enter a commit message", severity="warning")
+            return
+        self.query_one("#btn-commit", Button).disabled = True
+        self.query_one("#btn-skip", Button).disabled = True
+        self.run_worker(self._commit_worker(msg), exclusive=True)
+
+    async def _commit_worker(self, msg: str) -> None:
+        import asyncio
+        try:
+            add = await asyncio.create_subprocess_exec(
+                "git", "-C", self.fwdir, "add", "--", *self.files,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT)
+            out, _ = await add.communicate()
+            if add.returncode != 0:
+                self.notify("git add failed: "
+                            + out.decode(errors="replace").strip(),
+                            severity="error")
+                self.dismiss(None)
+                return
+            commit = await asyncio.create_subprocess_exec(
+                "git", "-C", self.fwdir, "commit", "-m", msg,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT)
+            out, _ = await commit.communicate()
+            text = out.decode(errors="replace").strip()
+            if commit.returncode == 0:
+                last = text.splitlines()[-1] if text else "committed"
+                self.notify(f"Committed: {last}")
+            elif "nothing to commit" in text:
+                self.notify("Nothing to commit (no changes)")
+            else:
+                self.notify(f"git commit failed: {text}", severity="error")
+        except Exception as e:
+            self.notify(f"git error: {e}", severity="error")
+        self.dismiss(None)
+
+    def action_skip(self) -> None:
+        self.dismiss(None)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-commit":
+            self.action_commit()
+        elif event.button.id == "btn-skip":
+            self.action_skip()
+
+
 # ---------------------------------------------------------------------------
 # main app
 # ---------------------------------------------------------------------------
@@ -1369,9 +1449,9 @@ class FirewallApp(App):
         Binding("d", "delete", "Delete"),
         Binding("n", "new_section", "New section"),
         Binding("v", "validate", "Validate"),
-        Binding("g", "preview", "Preview"),
-        Binding("p", "deploy", "Deploy"),
-        Binding("i", "git_diff", "Git diff"),
+        Binding("p", "preview", "Preview"),
+        Binding("D", "deploy", "Deploy"),
+        Binding("g", "git", "Git"),
         Binding("ctrl+z", "undo", "Undo"),
         Binding("ctrl+s", "save", "Save"),
         Binding("q", "quit", "Quit"),
@@ -1406,6 +1486,8 @@ class FirewallApp(App):
         self.undo_stack: list = []
         self.db_mode = False
         self._pending_host: str | None = None
+        # git state (cached: the repo status does not change mid-session)
+        self._git_info_cache: tuple[bool, str] | None = None
 
     # -- setup -------------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -2627,9 +2709,10 @@ class FirewallApp(App):
         except Exception as e:
             modal.append(f"\nError running deploy command: {e}")
 
-    def action_git_diff(self) -> None:
+    def action_git(self) -> None:
         """Show the git history for the current host's ruleset: pick a
-        commit, view its diff, load that version."""
+        commit, view its diff, load that version. Only available when the
+        firewall dir is inside a git repo (see check_action)."""
         if not self.current_host:
             self.notify("Select a host first", severity="warning")
             return
@@ -2674,6 +2757,54 @@ class FirewallApp(App):
             else:
                 out.append(l)
 
+    # -- git ---------------------------------------------------------------
+    def _git_info(self) -> tuple[bool, str]:
+        """(is_inside_work_tree, repo toplevel) for the firewall dir.
+        Cached: the repo status does not change mid-session."""
+        if self._git_info_cache is None:
+            import subprocess
+            try:
+                proc = subprocess.run(
+                    ["git", "-C", self.fwdir, "rev-parse",
+                     "--is-inside-work-tree", "--show-toplevel"],
+                    capture_output=True, text=True, timeout=10)
+                lines = proc.stdout.splitlines()
+                ok = (proc.returncode == 0 and len(lines) >= 1
+                      and lines[0].strip() == "true")
+                root = lines[1].strip() if ok and len(lines) > 1 else ""
+                self._git_info_cache = (ok, root)
+            except Exception:
+                self._git_info_cache = (False, "")
+        return self._git_info_cache
+
+    def _git_available(self) -> bool:
+        """True when the firewall dir is inside a git work tree."""
+        return self._git_info()[0]
+
+    def _git_root(self) -> str:
+        """The git repo toplevel for the firewall dir ("" if none)."""
+        return self._git_info()[1]
+
+    def check_action(self, action: str,
+                     parameters: tuple[object, ...]) -> bool | None:
+        """Hide the git action (and its footer key) when the firewall dir
+        is not inside a git repo."""
+        if action == "git":
+            return self._git_available()
+        return super().check_action(action, parameters)
+
+    def _offer_commit(self, paths: list[str]) -> None:
+        """After a save, offer an optional git commit for the changed files
+        (only when they live in a git repo)."""
+        if not self._git_available():
+            return
+        root = os.path.abspath(self._git_root())
+        files = [p for p in paths
+                 if os.path.abspath(p).startswith(root + os.sep)]
+        if not files:
+            return
+        self.push_screen(CommitModal(files, self.fwdir))
+
     def action_save(self) -> None:
         if self.db_mode or self.current_host is None:
             with open(self.db_path, "w") as fh:
@@ -2681,6 +2812,7 @@ class FirewallApp(App):
             self.dirty = False
             self._update_status()
             self.notify(f"Saved {os.path.basename(self.db_path)}")
+            self._offer_commit([self.db_path])
             return
         # group the spliced lines by their source file (host + includes)
         by_file: dict[str, list] = {}
@@ -2693,6 +2825,7 @@ class FirewallApp(App):
         self._update_status()
         saved = ", ".join(os.path.basename(p) for p in by_file)
         self.notify(f"Saved {saved}")
+        self._offer_commit(list(by_file))
 
     def _update_status(self) -> None:
         sb = self.query_one("#statusbar", Static)
@@ -2705,10 +2838,11 @@ class FirewallApp(App):
         empty_hint = "O=show empty"
         if view is not None and not view.hide_empty:
             empty_hint = "O=hide empty"
+        git_hint = "g=git " if self._git_available() else ""
         sb.update(
             f"a=add e=edit d=delete n=new section space=collapse o=toggle all "
-            f"{empty_hint} enter=edit v=validate g=preview p=deploy i=git "
-            f"history /=filter ctrl+z=undo ctrl+s=save q=quit   esc=menu{filt}")
+            f"{empty_hint} enter=edit v=validate p=preview D=deploy {git_hint}"
+            f"/=filter ctrl+z=undo ctrl+s=save q=quit   esc=menu{filt}")
 
     def on_rules_view_selection_changed(self, event) -> None:
         """Show the raw rule text of the selected rule in the status bar."""

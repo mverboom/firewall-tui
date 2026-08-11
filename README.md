@@ -9,7 +9,7 @@ The TUI understands the ruleset/db formats natively (a line-based parser
 with round-trip fidelity: comments, blank lines and ordering are preserved),
 mirrors the type's rule-expansion logic for validation, and offers a rule
 editor, a db editor, a generated-rules preview, a configurable deploy
-command, a git diff view and undo.
+command, git integration (history + optional commit-after-save) and undo.
 
 Documentation:
 - [docs/design.md](docs/design.md) — design, feasibility study and implementation history
@@ -46,12 +46,14 @@ Documentation:
 - **Validation** (`v`): expands every rule with the manifest's function
   semantics (db lookups + DNS fallback), checks globals, duplicate sections
   and proto coverage; errors/warnings are shown per rule
-- **Preview** (`g`): shows the generated iptables rules per proto
-- **Deploy** (`p`): runs a configurable deploy command for the current host
+- **Preview** (`p`): shows the generated iptables rules per proto
+- **Deploy** (`D`): runs a configurable deploy command for the current host
   in a background worker (see "Deploy command" below)
-- **Git history** (`i`): browse the host ruleset's git history — each
+- **Git** (`g`): browse the host ruleset's git history — each
   commit with its diffstat, the diff (or full file content, `f`) below,
-  and load any version (enter, with confirmation)
+  and load any version (enter, with confirmation). After `ctrl+s` the
+  TUI offers an optional commit for the changed files (message + enter).
+  Both only appear when the firewall dir is inside a git repo
 - **Undo** (ctrl+z, 50 snapshots), **search/filter** (`/`), **save** (ctrl+s)
 
 ## Requirements
@@ -59,7 +61,8 @@ Documentation:
 - Python >= 3.10 (developed against 3.13)
 - [textual](https://github.com/Textualize/textual) >= 8 (8.2.8 used)
 - `dig` (dnsutils) for DNS fallback during validation
-- `git` for the git diff view (only if the firewall dir is in a git repo)
+- `git` for the git features (history + commit-after-save; only shown if
+  the firewall dir is in a git repo)
 
 ## Installation
 
@@ -96,8 +99,8 @@ Configuration is read from an INI file. Lookup order:
 | `includedir` | `dir` | directory for `[#include]` files |
 | `db` | `dir/db` | path to the shared db file |
 | `explore_dir` | *(empty)* | directory with the last explorer data per host (e.g. `/home/cdist/explore`); when set, the rule editor shows a dropdown of the host's interfaces (from `<explore_dir>/<host>/interfaces`) for the Iface field, with a `(custom ...)` entry for arbitrary values |
-| `firewall_type` | `/home/cdist/files.external/cdist-types.git/__firewall` | directory of the `__firewall` cdist type; the `g` preview runs its manifest in generate-only mode (`FWTUI_GENERATE`) so the preview shows exactly what the type would deploy |
-| `deploy_command` | `cdist config -n -c /home/cdist/config {host}` | command run by `p`; `{host}` is replaced with the hostname |
+| `firewall_type` | `/home/cdist/files.external/cdist-types.git/__firewall` | directory of the `__firewall` cdist type; the `p` preview runs its manifest in generate-only mode (`FWTUI_GENERATE`) so the preview shows exactly what the type would deploy |
+| `deploy_command` | `cdist config -n -c /home/cdist/config {host}` | command run by `D`; `{host}` is replaced with the hostname |
 
 `[environment]` section: environment variables exported for the deploy
 command (defaults: `CDIST_BETA=1`, `CDIST_INSTALL`, `CDIST_EXPLORE`,
@@ -146,9 +149,9 @@ Main views:
 | `d` | delete selected rule / section / db entry / global key |
 | `n` | new section (Rules tab) |
 | `v` | validate current ruleset |
-| `g` | show generated-rules preview |
-| `p` | run the deploy command (see warning below) |
-| `i` | git history: browse commits, view diffs, load a version |
+| `p` | show generated-rules preview |
+| `D` | run the deploy command (see warning below) |
+| `g` | git: browse commits, view diffs, load a version (only shown when the firewall dir is in a git repo) |
 | `ctrl+s` | save |
 | `ctrl+z` | undo |
 | `q` | quit (asks to confirm when there are unsaved changes) |
@@ -190,20 +193,22 @@ Rule editor:
    press `a`.
 4. `v` to validate the whole ruleset against the db (an issue jumps to the
    rule's tab).
-5. `g` to inspect the rules the manifest would generate.
-6. `ctrl+s` to write the files (round-trip: comments/order preserved).
-7. `i` to browse the git history (diffs per commit, load a version), `p` to deploy.
+5. `p` to inspect the rules the manifest would generate.
+6. `ctrl+s` to write the files (round-trip: comments/order preserved);
+   when the files are in a git repo, the TUI then offers an optional
+   commit (message + enter, `esc` to skip).
+7. `g` to browse the git history (diffs per commit, load a version), `D` to deploy.
 
 ### Deploy command — dry run vs. real deploy
 
-`p` runs whatever `deploy_command` says, with `{host}` substituted and the
+`D` runs whatever `deploy_command` says, with `{host}` substituted and the
 `[environment]` variables set.
 
 - The **project default** is `cdist config -n ...` — a **dry run** (`-n`).
 - On the cdist server, `~/.firewall-tui.conf` overrides it to
   `/home/cdist/bin/runcdist -o firewall {host}`, which **actually deploys**
   the firewall manifest to the host (runcdist `-d` would be the dry-run
-  flag). Double-check the configured command before pressing `p`.
+  flag). Double-check the configured command before pressing `D`.
 
 ## Project layout
 
@@ -231,7 +236,8 @@ firewall-tui.conf  default configuration
 - Per-user config: `/home/cdist/.firewall-tui.conf` (overrides
   `deploy_command` to `runcdist -o firewall {host}`)
 - Data: `/home/cdist/config/files/firewall/` (rulesets + `db`), the config
-  repo is a git repo, so `i` (git history) and `ctrl+s` interact with it.
+  repo is a git repo, so `g` (git history) and `ctrl+s` (save + optional
+  commit) interact with it.
 
 ## Development notes
 

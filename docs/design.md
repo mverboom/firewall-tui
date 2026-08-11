@@ -155,8 +155,8 @@ New modules from the redesign: `columns.py` (rule -> column parser),
   validation authoritative).
 - No automated test suite; verified headless via textual's `run_test()`
   and by validating all production rulesets against `expand.py`.
-- Save writes the files; committing to git is left to the user (the git
-  diff view is there to help).
+- Save writes the files and offers an optional git commit for the
+  changed files (message + enter; only when the files are in a git repo).
 
 ## History
 
@@ -173,6 +173,9 @@ New modules from the redesign: `columns.py` (rule -> column parser),
   in each relevant tab; `o` toggles all headers open/closed and `O` toggles
   the display of sections empty for the active tab (so rules can be added
   to an existing section that has no rules in the current view).
+- 2026-08-11 — git integration: keys shuffled (`p` preview, `D` deploy,
+  `g` git), the git option is hidden when the firewall dir is not in a git
+  repo, and `ctrl+s` now offers an optional commit for the changed files.
 - Deployment on the cdist server: `/home/cdist/firewall-tui` (git repo,
   same remote as this repository), per-user config
   `/home/cdist/.firewall-tui.conf` overriding `deploy_command` to

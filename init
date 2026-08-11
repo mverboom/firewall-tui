@@ -51,7 +51,7 @@ check_optional() {
    command -v dig >/dev/null 2>&1 || \
       printf 'note: dig (dnsutils) not found - DNS fallback during validation will not work\n'
    command -v git >/dev/null 2>&1 || \
-      printf 'note: git not found - the git history view (i) will not work\n'
+      printf 'note: git not found - the git features (g) will not work\n'
 }
 
 main() {
