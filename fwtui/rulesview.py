@@ -179,16 +179,34 @@ class RulesView(Widget, can_focus=True):
                 contentful.add(self._key(row))
         return contentful
 
+    def _matching_include_keys(self, matching: set) -> set[str]:
+        """Include bars that contain a section with matching rules (filter)."""
+        result: set[str] = set()
+        stack: list[tuple[str, str]] = []  # (included file path, key)
+        for row in self.all_rows:
+            if row[0] == "include":
+                stack.append((row[2] or "", self._key(row)))
+            elif row[0] == "section":
+                while stack and stack[-1][0] != (row[2] or ""):
+                    stack.pop()
+                if (row[1], row[2]) in matching:
+                    for _, key in stack:
+                        result.add(key)
+        return result
+
     def _rebuild_visible(self) -> None:
         """Recompute visible rows; collapsed sections and include groups hide
         their content. A stack tracks nested include groups by source file.
-        A filter hides non-matching rows (sections with matching rules stay).
+        A filter hides non-matching rows; sections (and include bars) without
+        any matching rule are hidden entirely, not left as empty headers.
         When hide_empty is on, headers without rules in this view are hidden
         entirely (so each table tab only shows sections it has rules for)."""
         self.rows = []
         stack: list[tuple[str, bool]] = []  # (included file path, hidden)
         section_hidden = False
         matching = self._matching_sections()
+        matching_includes = (self._matching_include_keys(matching)
+                             if matching is not None else None)
         contentful = self._contentful_keys() if self.hide_empty else None
         for row in self.all_rows:
             kind = row[0]
@@ -197,10 +215,16 @@ class RulesView(Widget, can_focus=True):
                 if row[2]:
                     stack.append((row[2], key in self.collapsed
                                   or (contentful is not None
-                                      and key not in contentful)))
+                                      and key not in contentful)
+                                  or (matching_includes is not None
+                                      and key not in matching_includes)))
                 # missing includes always show (warning state); resolved
-                # includes with no rules in this view are hidden like sections
+                # includes with no rules in this view, or none matching the
+                # filter, are hidden like sections
                 if contentful is not None and key not in contentful and row[2]:
+                    continue
+                if (matching_includes is not None
+                        and key not in matching_includes and row[2]):
                     continue
                 self.rows.append(row)
                 continue
@@ -213,11 +237,12 @@ class RulesView(Widget, can_focus=True):
                             and (row[1], row[2]) not in matching)
                 empty = (contentful is not None
                          and self._key(row) not in contentful)
-                if empty:
-                    section_hidden = True  # no rules under it either
+                if empty or filtered:
+                    # no rules in this view, or none match the filter:
+                    # hide the header entirely (its rules are hidden too)
+                    section_hidden = True
                     continue
-                section_hidden = (row[1] in self.collapsed) or group_hidden \
-                    or filtered
+                section_hidden = (row[1] in self.collapsed) or group_hidden
                 self.rows.append(row)
                 continue
             if kind == "implicit-section":
