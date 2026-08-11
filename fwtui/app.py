@@ -663,6 +663,15 @@ class RuleEditor(ModalScreen):
         elif event.key == "shift+tab":
             self._focus_component(self._current_component() - 1)
             event.stop()
+        elif event.key in ("j", "k") and isinstance(self.focused, Select):
+            # vi-style: j/k move between fields while a dropdown is focused
+            # (text fields keep j/k for typing; an open dropdown's overlay
+            # takes focus, so option navigation is unaffected)
+            if event.key == "j":
+                self.action_next_field()
+            else:
+                self.action_prev_field()
+            event.stop()
 
     def _current_component(self) -> int:
         """0=Rule(builder) 1=Save 2=Cancel 3=Raw."""
