@@ -1424,6 +1424,27 @@ class FirewallApp(App):
     #rules-header, #nat-header, #mangle-header { height: 1; text-style: bold; background: $panel; }
     #rules-view, #nat-view, #mangle-view { height: 1fr; }
     #statusbar { height: 1; background: $panel; color: $text; padding: 0 1; }
+    /* slim line buttons everywhere (borderless text buttons, 1 line tall) */
+    Button {
+        border: none;
+        min-height: 1;
+        height: 1;
+        padding: 0 2;
+        background: transparent;
+        color: $text;
+        text-style: bold;
+    }
+    Button:hover, Button:focus {
+        background: $panel;
+    }
+    Button.-primary { color: $primary; }
+    Button.-success { color: $success; }
+    Button.-warning { color: $warning; }
+    Button.-error { color: $error; }
+    Button:disabled {
+        background: transparent;
+        text-opacity: 0.4;
+    }
     .field { margin: 0 1 1 1; }
     #builder { width: 55%; }
     #rawcol { width: 45%; }
@@ -1437,8 +1458,8 @@ class FirewallApp(App):
     .fselect { width: 1fr; }
     .finput { width: 1fr; }
     #rawcol TextArea { height: 12; }
-    #modal-buttons { height: 3; align-horizontal: left; padding: 0 1; }
-    #modal-buttons Button { margin: 0 1; }
+    #modal-buttons { height: 2; align-horizontal: left; align-vertical: middle; padding: 0 1; }
+    #modal-buttons Button { margin: 0 1 0 0; }
     .modal-title { padding: 1; text-style: bold; }
     #report { height: 20; }
     """
