@@ -208,6 +208,16 @@ ACTIONS_BY_TABLE = {
                "reject(prohibited)", "log"],
 }
 
+# Source/Destination type selector: pick the kind first, then the value.
+SRC_TYPES = [
+    ("(any)", "any"),
+    ("host", "host"),
+    ("hostgroup", "hostgroup"),
+    ("network", "network"),
+    ("networkgroup", "networkgroup"),
+    ("custom", "custom"),
+]
+
 PROTOS = [("both (46)", "46"), ("IPv4", "4"), ("IPv6", "6")]
 
 # Sentinel value for the "(custom ...)" option in the Source/Dest dropdowns
@@ -284,21 +294,105 @@ class RuleEditor(ModalScreen):
         opts.append(("(custom ...)", CUSTOM))
         return opts
 
-    def _source_options(self) -> list:
-        """Options for the Source/Dest fields: db hosts, networks, groups,
-        plus an explicit (custom ...) entry so raw values (plain IPs etc.)
-        are known to be allowed."""
-        opts = [("(any)", "")]
-        for h in self.hosts:
-            opts.append((f"host({h})", f"host({h})"))
-        for n in self.networks:
-            opts.append((f"network({n})", f"network({n})"))
-        for g in self.hostgroups:
-            opts.append((f"hostgroup({g})", f"hostgroup({g})"))
-        for g in self.networkgroups:
-            opts.append((f"networkgroup({g})", f"networkgroup({g})"))
+    def _service_options(self) -> list:
+        """Service dropdown: show each service's port/proto next to its name
+        (e.g. 'ssh (22/tcp)') so the value is clear and type-to-search
+        matches on it too."""
+        opts = [("(none)", "")]
+        for s in self.services:
+            val = self.db.services.get(s, "")
+            opts.append((f"{s} ({val})" if val else s, s))
         opts.append(("(custom ...)", CUSTOM))
         return opts
+
+    def _to_svc_options(self) -> list:
+        """To-svc dropdown (DNAT/SNAT target): same name (port/proto)
+        display; the value keeps the service() wrapper used in
+        --to-destination."""
+        opts = [("(none)", "")]
+        for s in self.services:
+            val = self.db.services.get(s, "")
+            opts.append((f"{s} ({val})" if val else s, f"service({s})"))
+        return opts
+
+    def _src_type_options(self, kind: str) -> list:
+        """Value options for a Source/Destination type: the db entries of
+        that kind, wrapped in the manifest's function form (host(x),
+        network(y), ...)."""
+        if kind == "host":
+            return [("(none)", "")] + [(h, f"host({h})")
+                                         for h in self.hosts]
+        if kind == "hostgroup":
+            return [("(none)", "")] + [(g, f"hostgroup({g})")
+                                         for g in self.hostgroups]
+        if kind == "network":
+            return [("(none)", "")] + [(n, f"network({n})")
+                                         for n in self.networks]
+        if kind == "networkgroup":
+            return [("(none)", "")] + [(g, f"networkgroup({g})")
+                                         for g in self.networkgroups]
+        return [("(any)", "")]
+
+    def _src_field(self, wid: str) -> Horizontal:
+        """Two-step Source/Destination field: a type dropdown (any / host /
+        hostgroup / network / networkgroup / custom) plus, next to it, the
+        value dropdown for that type or a raw-value input for custom."""
+        return Horizontal(
+            NavSelect(SRC_TYPES, value="any", id=f"{wid}-type",
+                      classes="fselect src-type", allow_blank=False),
+            NavSelect([("(any)", "")], value="", id=f"{wid}-val",
+                      classes="fselect src-val", allow_blank=False),
+            Input(placeholder="raw value (IP, host(x), ...)",
+                  id=f"{wid}-custom", classes="finput src-custom"),
+            id=f"{wid}-box", classes="fbox")
+
+    def _apply_src_type(self, wid: str) -> None:
+        """Populate the value dropdown and show/hide the value dropdown vs
+        the custom input for the field's current type. Does not touch the
+        raw text. A value that is still valid for the new type is kept
+        (so deferred Select.Changed messages from a sync don't wipe it)."""
+        kind = self.query_one(f"#{wid}-type", Select).value
+        val_sel = self.query_one(f"#{wid}-val", Select)
+        custom_in = self.query_one(f"#{wid}-custom", Input)
+        cur = val_sel.value
+        val_sel.set_options(self._src_type_options(kind))
+        if cur in [v for _, v in val_sel._options]:
+            val_sel.value = cur
+        else:
+            val_sel.value = ""
+        val_sel.display = kind not in ("any", "custom")
+        custom_in.display = kind == "custom"
+
+    def _on_src_type_changed(self, wid: str) -> None:
+        """Type dropdown changed: repopulate the value dropdown, toggle the
+        custom input, and rebuild the raw text."""
+        self._apply_src_type(wid)
+        self._rebuild_raw()
+
+    def _set_src_value(self, wid: str, raw_value: str) -> None:
+        """Set the type + value widgets from a raw -s/-d value (e.g.
+        'host(proxy)' -> type host, value proxy; '192.168.1.77' -> custom)."""
+        wid = wid.lstrip("#")
+        import re
+        m = re.match(r"(host|hostgroup|network|networkgroup)\(([^)]+)\)",
+                     raw_value)
+        kind, name = (m.group(1), m.group(2)) if m else ("custom", raw_value)
+        self.query_one(f"#{wid}-type", Select).value = kind
+        self._apply_src_type(wid)
+        if kind == "custom":
+            self.query_one(f"#{wid}-custom", Input).value = name
+        else:
+            self._set_select_value(self.query_one(f"#{wid}-val", Select),
+                                   raw_value)
+
+    def _src_raw_value(self, wid: str) -> str:
+        """The raw -s/-d value the field currently represents ("" for any)."""
+        kind = self.query_one(f"#{wid}-type", Select).value
+        if kind in ("", "any"):
+            return ""
+        if kind == "custom":
+            return self.query_one(f"#{wid}-custom", Input).value.strip()
+        return self.query_one(f"#{wid}-val", Select).value or ""
 
     def _set_select_value(self, sel: Select, value: str) -> None:
         """Set a Select's value, adding it as an option if not present (so
@@ -342,23 +436,17 @@ class RuleEditor(ModalScreen):
                 yield self._row("Chain", NavSelect(
                     self._chains(), id="f-chain",
                     classes="fselect -textual-compact", allow_blank=False))
-                yield self._row("Iface (-i)",
+                yield self._row("Iface",
                     NavSelect(self._iface_options(), value="", id="f-iface",
                               classes="fselect -textual-compact",
                               allow_blank=False)
                     if self.ifaces else Input(
                         placeholder="e.g. eth0, vlan10", id="f-iface",
                         classes="finput -textual-compact"))
-                yield self._row("Source (-s)", NavSelect(
-                    self._source_options(), value="", id="f-src",
-                    classes="fselect -textual-compact", allow_blank=False))
-                yield self._row("Dest (-d)", NavSelect(
-                    self._source_options(), value="", id="f-dst",
-                    classes="fselect -textual-compact", allow_blank=False))
+                yield self._row("Source", self._src_field("f-src"))
+                yield self._row("Destination", self._src_field("f-dst"))
                 yield self._row("Service", NavSelect(
-                    [("(none)", "")] + [(s, s) for s in self.services]
-                    + [("(custom ...)", CUSTOM)],
-                    value="", id="f-svc",
+                    self._service_options(), value="", id="f-svc",
                     classes="fselect -textual-compact", allow_blank=False))
                 yield self._row("Action", NavSelect(
                     self._actions(), value="ACCEPT", id="f-action",
@@ -370,9 +458,7 @@ class RuleEditor(ModalScreen):
                     classes="fselect -textual-compact", allow_blank=False),
                     classes="natrow")
                 yield self._row("To svc", NavSelect(
-                    [("(none)", "")] + [(f"service({s})", f"service({s})")
-                                           for s in self.services],
-                    value="", id="f-to-svc",
+                    self._to_svc_options(), value="", id="f-to-svc",
                     classes="fselect -textual-compact", allow_blank=False),
                     classes="natrow")
                 yield self._row("Log prefix", Input(
@@ -382,8 +468,9 @@ class RuleEditor(ModalScreen):
                     placeholder="e.g. -m limit --limit 10/min", id="f-extra",
                     classes="finput -textual-compact"))
                 yield Label(
-                    "Source/Dest/Service: pick a db entry, or '(custom ...)' "
-                    "for any raw value", classes="fhint")
+                    "Source/Destination: pick a type, then a value "
+                    "(custom = raw IP/address). Service: pick a db entry or "
+                    "'(custom ...)'", classes="fhint")
             with Vertical(id="rawcol"):
                 yield Label("Raw rule text (authoritative)", classes="frow")
                 yield TextArea(self.text, id="f-raw")
@@ -398,6 +485,8 @@ class RuleEditor(ModalScreen):
             w.add_class("-textual-compact")
         self._syncing = False
         self._sync_timer = None
+        for wid in ("f-src", "f-dst"):
+            self._apply_src_type(wid)
         self._sync_from_raw()
         self._update_conditional_rows()
 
@@ -437,8 +526,7 @@ class RuleEditor(ModalScreen):
                 m = re.search(rf"{flag}\s+(\S+)", raw)
                 if m:
                     if wid in ("#f-src", "#f-dst"):
-                        self._set_select_value(self.query_one(wid, Select),
-                                               m.group(1))
+                        self._set_src_value(wid, m.group(1))
                     else:
                         w = self.query_one(wid)
                         if isinstance(w, Input):
@@ -448,8 +536,7 @@ class RuleEditor(ModalScreen):
             # DNAT/SNAT rules use the long form --destination; capture it too
             m = re.search(r"--destination\s+(\S+)", raw)
             if m:
-                self._set_select_value(self.query_one("#f-dst", Select),
-                                       m.group(1))
+                self._set_src_value("#f-dst", m.group(1))
             m = re.search(r"dservices\(([^)]+)\)", raw)
             if m:
                 self._set_select_value(self.query_one("#f-svc", Select),
@@ -487,17 +574,11 @@ class RuleEditor(ModalScreen):
             self._syncing = False
         self._update_conditional_rows()
 
-    def _to_host_options(self) -> set:
-        return {f"host({h})" for h in self.hosts}
-
-    def _to_svc_options(self) -> set:
-        return {f"service({s})" for s in self.services}
-
     def _rebuild_raw(self) -> None:
         chain = self.query_one("#f-chain", Select).value or "INPUT"
         iface = self.query_one("#f-iface").value  # Input or Select
-        src = self.query_one("#f-src", Select).value or ""
-        dst = self.query_one("#f-dst", Select).value or ""
+        src = self._src_raw_value("f-src")
+        dst = self._src_raw_value("f-dst")
         svc = self.query_one("#f-svc", Select).value or ""
         action = self.query_one("#f-action", Select).value or "ACCEPT"
         to_host = self.query_one("#f-to-host", Select).value or ""
@@ -511,36 +592,32 @@ class RuleEditor(ModalScreen):
     def on_input_changed(self, event: Input.Changed) -> None:
         if self._syncing:
             return
-        if event.input.id in ("f-iface", "f-extra", "f-logprefix"):
+        if event.input.id in ("f-iface", "f-extra", "f-logprefix",
+                              "f-src-custom", "f-dst-custom"):
             self._rebuild_raw()
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if self._syncing:
             return
-        if event.value == CUSTOM and event.select.id in (
-                "f-src", "f-dst", "f-iface", "f-svc"):
+        wid = event.select.id
+        if event.value == CUSTOM and wid in ("f-iface", "f-svc"):
             # "(custom ...)": ask for a raw value; do NOT rebuild the raw
             # text with the sentinel (it still holds the previous value)
-            self._open_custom_value(event.select.id)
+            self._open_custom_value(wid)
             return
-        if event.select.id in ("f-chain", "f-action", "f-svc",
-                               "f-to-host", "f-to-svc", "f-src", "f-dst",
-                               "f-iface"):
+        if wid in ("f-src-type", "f-dst-type"):
+            self._on_src_type_changed(wid[:-5])  # strip the "-type" suffix
+            return
+        if wid in ("f-chain", "f-action", "f-svc", "f-to-host",
+                   "f-to-svc", "f-src-val", "f-dst-val", "f-iface"):
             self._rebuild_raw()
-        if event.select.id == "f-action":
+        if wid == "f-action":
             self._update_conditional_rows()
 
     def _open_custom_value(self, wid: str) -> None:
-        """'(custom ...)' picked in Source/Dest/Iface/Service: prompt for a
-        value."""
+        """'(custom ...)' picked in Iface/Service: prompt for a value."""
         if wid == "f-iface":
             title, placeholder = "Interface value", "e.g. eth0, vlan10"
-        elif wid == "f-src":
-            title, placeholder = ("Source value (db entry or raw IP/address)",
-                                  "e.g. 192.168.1.77, host(x), network(y)")
-        elif wid == "f-dst":
-            title, placeholder = ("Dest value (db entry or raw IP/address)",
-                                  "e.g. 192.168.1.77, host(x), network(y)")
         else:  # f-svc
             title, placeholder = ("Service value (db entry or raw name)",
                                   "e.g. ssh, https, or dservices(a,b)")
@@ -554,12 +631,7 @@ class RuleEditor(ModalScreen):
         text is untouched at this point, so parse it."""
         import re
         raw = self.query_one("#f-raw", TextArea).text
-        if wid == "f-src":
-            m = re.search(r"-s\s+(\S+)", raw)
-        elif wid == "f-dst":
-            m = (re.search(r"--destination\s+(\S+)", raw)
-                 or re.search(r"-d\s+(\S+)", raw))
-        elif wid == "f-svc":
+        if wid == "f-svc":
             m = (re.search(r"dservices\(([^)]+)\)", raw)
                  or re.search(r"dservice\(([^)]+)\)", raw))
         else:  # f-iface
@@ -627,31 +699,31 @@ class RuleEditor(ModalScreen):
         """Rebuild the db-backed dropdowns, preserving current values
         (raw values that are not db entries are re-added as options)."""
         for wid, opts in (
-            ("#f-svc", [("(none)", "")] + [(s, s) for s in self.services]
-             + [("(custom ...)", CUSTOM)]),
+            ("#f-svc", self._service_options()),
             ("#f-to-host", [("(none)", "")]
              + [(f"host({h})", f"host({h})") for h in self.hosts]),
-            ("#f-to-svc", [("(none)", "")]
-             + [(f"service({s})", f"service({s})") for s in self.services]),
+            ("#f-to-svc", self._to_svc_options()),
         ):
             sel = self.query_one(wid, Select)
             cur = sel.value
             sel.set_options(opts)
             self._set_select_value(sel, cur)
-        for wid in ("#f-src", "#f-dst"):
-            sel = self.query_one(wid, Select)
-            cur = sel.value
-            sel.set_options(self._source_options())
-            # re-add raw values (plain IPs etc.) that are not db entries
-            self._set_select_value(sel, cur)
+        for wid in ("f-src", "f-dst"):
+            kind = self.query_one(f"#{wid}-type", Select).value
+            val_sel = self.query_one(f"#{wid}-val", Select)
+            cur = val_sel.value
+            val_sel.set_options(self._src_type_options(kind))
+            self._set_select_value(val_sel, cur)
 
     # -- form navigation ----------------------------------------------------
-    FIELD_IDS = ("f-proto", "f-chain", "f-iface", "f-src",
-                 "f-dst", "f-svc", "f-action", "f-to-host", "f-to-svc",
-                 "f-logprefix", "f-extra", "f-raw")
+    FIELD_IDS = ("f-proto", "f-chain", "f-iface", "f-src-type",
+                 "f-src-val", "f-src-custom", "f-dst-type", "f-dst-val",
+                 "f-dst-custom", "f-svc", "f-action", "f-to-host",
+                 "f-to-svc", "f-logprefix", "f-extra", "f-raw")
 
     def _fields(self) -> list:
-        return [self.query_one(f"#{wid}") for wid in self.FIELD_IDS]
+        return [self.query_one(f"#{wid}") for wid in self.FIELD_IDS
+                if self.query_one(f"#{wid}").display]
 
     def action_next_field(self) -> None:
         fields = self._fields()
@@ -1472,6 +1544,9 @@ class FirewallApp(App):
     .flabel { width: 22; padding: 0 1 0 0; }
     .fselect { width: 1fr; }
     .finput { width: 1fr; }
+    .fbox { width: 1fr; }
+    .src-type { width: 13; }
+    .src-val, .src-custom { width: 1fr; }
     #rawcol TextArea { height: 12; }
     #modal-buttons { height: 2; align-horizontal: left; align-vertical: middle; padding: 0 1; }
     #modal-buttons Button { margin: 0 1 0 0; }
