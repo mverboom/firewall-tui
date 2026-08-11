@@ -2245,19 +2245,14 @@ class FirewallApp(App):
 
     def _global_row_position(self, table) -> tuple[int, int] | None:
         """Screen position of the cursor row in the Global table, so the
-        choice dropdown can open in place."""
+        choice dropdown can open in place. table.region is already relative
+        to the screen; _get_row_region is relative to the table."""
         try:
             row_index = table.cursor_coordinate[0]
             region = table._get_row_region(row_index)
-            x, y = table.region.x, table.region.y
-            node = table.parent
-            while node is not None and not isinstance(node, Screen):
-                x += node.region.x
-                y += node.region.y
-                node = node.parent
-            y += region.y - int(table.scroll_y)
-            # land over the value column (key column is 16 wide + row label)
-            return (x + 18, y)
+            x = table.region.x + 18  # over the value column (key col + label)
+            y = table.region.y + region.y - int(table.scroll_y)
+            return (x, y)
         except Exception:
             return None
 
