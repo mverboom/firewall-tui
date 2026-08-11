@@ -1662,8 +1662,38 @@ class FirewallApp(App):
 
     # -- keyboard navigation ------------------------------------------------
     def on_key(self, event) -> None:
-        """Vertical navigation: host-select <-> tabs <-> content."""
+        """Vertical navigation: host-select <-> tabs <-> content. View keys
+        (o, O, space, /, ctrl+up/down) pressed while the tab strip is
+        focused act on the active tab's view, so they work right after
+        switching tabs."""
         focused = self.focused
+        if isinstance(focused, ContentTabs):
+            view = self._active_rules_view()
+            if view is not None:
+                if event.key == "o":
+                    view.action_toggle_all()
+                    event.stop()
+                    return
+                if event.key == "O":
+                    view.action_toggle_empty()
+                    event.stop()
+                    return
+                if event.key == "space":
+                    view.action_toggle_collapse()
+                    event.stop()
+                    return
+                if event.key == "slash":
+                    self._show_filter()
+                    event.stop()
+                    return
+                if event.key == "ctrl+up":
+                    view.action_move_up()
+                    event.stop()
+                    return
+                if event.key == "ctrl+down":
+                    view.action_move_down()
+                    event.stop()
+                    return
         if event.key == "down":
             if focused is self.host_select:
                 self._focus_tabs()
