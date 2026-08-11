@@ -387,10 +387,11 @@ class RulesView(Widget, can_focus=True):
 
     # -- navigation --------------------------------------------------------
     def action_move(self, delta: int) -> None:
-        if not self.rows:
-            return
         if delta < 0 and self.selected == 0 and self.scroll == 0:
+            # at the very top (including an empty view): back to the menu
             self.post_message(self.NavigateUp())
+            return
+        if not self.rows:
             return
         self.selected = max(0, min(len(self.rows) - 1, self.selected + delta))
         self._ensure_visible()
