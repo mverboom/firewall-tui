@@ -164,6 +164,7 @@ Rule editor:
 | `tab` / `shift+tab` | cycle Rule builder / Save / Cancel / Raw text |
 | `up` / `down` | move between form fields |
 | `j` / `k` | move between form fields while a dropdown is focused (text fields keep `j`/`k` for typing) |
+| *(in an open dropdown)* | type to search/filter the options (all dropdowns, like the host selector) |
 | `s` / `ctrl+s` | save (typing `s` in a text field still types) |
 | `a` | add a db entry without leaving the editor (`section:key=value`) |
 | `esc` | cancel |

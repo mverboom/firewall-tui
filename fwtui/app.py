@@ -93,7 +93,10 @@ class NavSelect(Select, inherit_bindings=False):
 
     The stock Select opens its dropdown on up/down too, which blocks using
     those keys to move between form fields / the host selector and tabs.
-    type_to_search is off so printable keys (a, s) reach the modal shortcuts.
+    type_to_search is on so typing in an open dropdown filters the options
+    (fast for long db-backed lists); while the dropdown is closed, printable
+    keys still bubble, so the modal shortcuts (a, s) and vi j/k field
+    navigation keep working.
     """
 
     BINDINGS = [
@@ -101,7 +104,7 @@ class NavSelect(Select, inherit_bindings=False):
     ]
 
     def __init__(self, *args, **kwargs) -> None:
-        kwargs.setdefault("type_to_search", False)
+        kwargs.setdefault("type_to_search", True)
         super().__init__(*args, **kwargs)
 
 
