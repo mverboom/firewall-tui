@@ -326,7 +326,8 @@ class RuleEditor(ModalScreen):
                     self._source_options(), value="", id="f-dst",
                     classes="fselect -textual-compact", allow_blank=False))
                 yield self._row("Service", NavSelect(
-                    [("(none)", "")] + [(s, s) for s in self.services],
+                    [("(none)", "")] + [(s, s) for s in self.services]
+                    + [("(custom ...)", CUSTOM)],
                     value="", id="f-svc",
                     classes="fselect -textual-compact", allow_blank=False))
                 yield self._row("Action", NavSelect(
@@ -351,8 +352,8 @@ class RuleEditor(ModalScreen):
                     placeholder="e.g. -m limit --limit 10/min", id="f-extra",
                     classes="finput -textual-compact"))
                 yield Label(
-                    "Source/Dest: pick a db entry, or '(custom ...)' for any "
-                    "IP/address", classes="fhint")
+                    "Source/Dest/Service: pick a db entry, or '(custom ...)' "
+                    "for any raw value", classes="fhint")
             with Vertical(id="rawcol"):
                 yield Label("Raw rule text (authoritative)", classes="frow")
                 yield TextArea(self.text, id="f-raw")
@@ -423,9 +424,10 @@ class RuleEditor(ModalScreen):
                                        f"dservices({m.group(1)})")
             m = re.search(r"dservice\(([^)]+)\)", raw)
             if m:
-                svc = m.group(1)
-                if svc in self.services:
-                    self.query_one("#f-svc", Select).value = svc
+                # keep unknown service names as raw options so opening and
+                # saving an existing rule never drops a dservice() clause
+                self._set_select_value(self.query_one("#f-svc", Select),
+                                       m.group(1))
             m = re.search(r"-j\s+(\S+)", raw)
             if m:
                 act = m.group(1)
@@ -484,7 +486,7 @@ class RuleEditor(ModalScreen):
         if self._syncing:
             return
         if event.value == CUSTOM and event.select.id in (
-                "f-src", "f-dst", "f-iface"):
+                "f-src", "f-dst", "f-iface", "f-svc"):
             # "(custom ...)": ask for a raw value; do NOT rebuild the raw
             # text with the sentinel (it still holds the previous value)
             self._open_custom_value(event.select.id)
@@ -497,15 +499,19 @@ class RuleEditor(ModalScreen):
             self._update_conditional_rows()
 
     def _open_custom_value(self, wid: str) -> None:
-        """'(custom ...)' picked in Source/Dest/Iface: prompt for a value."""
+        """'(custom ...)' picked in Source/Dest/Iface/Service: prompt for a
+        value."""
         if wid == "f-iface":
             title, placeholder = "Interface value", "e.g. eth0, vlan10"
         elif wid == "f-src":
             title, placeholder = ("Source value (db entry or raw IP/address)",
                                   "e.g. 192.168.1.77, host(x), network(y)")
-        else:
+        elif wid == "f-dst":
             title, placeholder = ("Dest value (db entry or raw IP/address)",
                                   "e.g. 192.168.1.77, host(x), network(y)")
+        else:  # f-svc
+            title, placeholder = ("Service value (db entry or raw name)",
+                                  "e.g. ssh, https, or dservices(a,b)")
         self.app.push_screen(
             Prompt(title, value=self._current_field_value(wid),
                    placeholder=placeholder),
@@ -521,6 +527,9 @@ class RuleEditor(ModalScreen):
         elif wid == "f-dst":
             m = (re.search(r"--destination\s+(\S+)", raw)
                  or re.search(r"-d\s+(\S+)", raw))
+        elif wid == "f-svc":
+            m = (re.search(r"dservices\(([^)]+)\)", raw)
+                 or re.search(r"dservice\(([^)]+)\)", raw))
         else:  # f-iface
             m = re.search(r"-i\s+(\S+)", raw)
         return m.group(1) if m else ""
@@ -585,7 +594,8 @@ class RuleEditor(ModalScreen):
         """Rebuild the db-backed dropdowns, preserving current values
         (raw values that are not db entries are re-added as options)."""
         for wid, opts in (
-            ("#f-svc", [("(none)", "")] + [(s, s) for s in self.services]),
+            ("#f-svc", [("(none)", "")] + [(s, s) for s in self.services]
+             + [("(custom ...)", CUSTOM)]),
             ("#f-to-host", [("(none)", "")]
              + [(f"host({h})", f"host({h})") for h in self.hosts]),
             ("#f-to-svc", [("(none)", "")]
