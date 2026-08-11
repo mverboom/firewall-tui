@@ -3,7 +3,7 @@
 Turns raw rule text like
     filter=-A INPUT -s host(proxy) dservice(node-red) -j ACCEPT
 into
-    table=filter  chain=input  from=proxy  sport=any  to=any
+    chain=input  from=proxy  sport=any  to=any
     proto=tcp  port=node-red  action=accept  target=-
 
 Function args are shown as-is (proxy, node-red), not resolved to IPs, so the
@@ -16,7 +16,7 @@ import re
 
 from .expand import Db
 
-COLUMNS = ("table", "chain", "from", "sport", "to", "proto", "port",
+COLUMNS = ("chain", "from", "sport", "to", "proto", "port",
            "action", "target")
 
 
@@ -29,7 +29,6 @@ def _shorten(v: str) -> str:
 def rule_columns(text: str, db: Db) -> dict:
     """Parse one rule line into a dict of overview columns."""
     cols = {c: "any" for c in COLUMNS}
-    cols["table"] = ""
     cols["action"] = ""
     cols["target"] = ""
 

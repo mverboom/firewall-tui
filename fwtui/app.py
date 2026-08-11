@@ -45,8 +45,6 @@ from textual.widgets._tabbed_content import ContentTabs
 from . import columns, expand, implicit, parser
 from .config import load_config
 from .dbview import DbView
-from .rulesview import COLUMNS as RULE_COLS
-from .rulesview import COL_WIDTHS as RULE_COL_WIDTHS
 from .rulesview import RulesView, header_text
 
 FW_DIR_DEFAULT = "/home/cdist/config/files/firewall"
@@ -308,10 +306,6 @@ class RuleEditor(ModalScreen):
         yield Static("Rule editor", classes="modal-title")
         with Horizontal():
             with Vertical(id="builder"):
-                yield self._row("Table", NavSelect(
-                    [(t, t) for t in parser.TABLE_KEYS], value=self.table,
-                    id="f-table", classes="fselect -textual-compact",
-                    allow_blank=False))
                 yield self._row("Proto", NavSelect(
                     PROTOS, value=self.proto, id="f-proto",
                     classes="fselect -textual-compact", allow_blank=False))
@@ -547,10 +541,12 @@ class RuleEditor(ModalScreen):
             self.action_cancel()
 
     def action_save(self) -> None:
-        table = self.query_one("#f-table", Select).value or "filter"
+        # the table comes from the tab the rule was edited in; the editor's
+        # self.table was set by the caller (active tab's table on add, the
+        # rule's own table on edit - which matches the tab it was opened from)
         proto = self.query_one("#f-proto", Select).value or "4"
         text = self.query_one("#f-raw", TextArea).text.strip()
-        self.dismiss({"table": table, "proto": proto, "text": text})
+        self.dismiss({"table": self.table, "proto": proto, "text": text})
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -607,7 +603,7 @@ class RuleEditor(ModalScreen):
             self._set_select_value(sel, cur)
 
     # -- form navigation ----------------------------------------------------
-    FIELD_IDS = ("f-table", "f-proto", "f-chain", "f-iface", "f-src",
+    FIELD_IDS = ("f-proto", "f-chain", "f-iface", "f-src",
                  "f-dst", "f-svc", "f-action", "f-to-host", "f-to-svc",
                  "f-logprefix", "f-extra", "f-raw")
 
@@ -659,7 +655,7 @@ class RuleEditor(ModalScreen):
     def _focus_component(self, idx: int) -> None:
         idx %= 4
         if idx == 0:
-            self.query_one("#f-table").focus()
+            self.query_one("#f-proto").focus()
         elif idx == 1:
             self.query_one("#btn-save").focus()
         elif idx == 2:
@@ -1446,9 +1442,8 @@ class FirewallApp(App):
                 for r in parser.rules_in_section(self.lines, l):
                     if r.table not in tables:
                         continue
-                    cols = columns.rule_columns(r.value, self.db)
-                    cols["table"] = r.table
-                    rows.append(("rule", r, l.name, cols))
+                    rows.append(("rule", r, l.name,
+                                 columns.rule_columns(r.value, self.db)))
         # implicit rules that come LAST (icmp allow, log, policy)
         if show_implicit:
             for group, rdicts in bottom_groups:

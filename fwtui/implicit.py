@@ -25,7 +25,7 @@ CHAINS = ("input", "output", "forward")
 
 def _row(chain: str, action: str, comment: str) -> dict:
     return {
-        "table": "filter", "chain": chain, "from": "any", "sport": "any",
+        "chain": chain, "from": "any", "sport": "any",
         "to": "any", "proto": "any", "port": "any", "action": action,
         "target": "", "comment": comment,
     }

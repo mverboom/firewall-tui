@@ -73,10 +73,11 @@ Working features (all in `fwtui/`):
 - Browse all rulesets + shared db; host selector + `db` button in the top
   bar (the db is global, not per-ruleset).
 - Rules tab: full-width view with sections as spanning header bars and
-  rules as 9-column rows (`table | chain | from | sport | to | proto |
-  port | action | target`); function args shown as-is, not resolved IPs;
-  manual scrolling; mouse support; the status bar shows the raw rule text
-  of the selected row.
+  rules as 8-column rows (`chain | from | sport | to | proto |
+  port | action | target`; the table column was dropped when the per-table
+  tabs landed — the tab itself is the table); function args shown as-is,
+  not resolved IPs; manual scrolling; mouse support; the status bar shows
+  the raw rule text of the selected row.
 - **Table tabs**: Rules (filter) / NAT / Mangle each show only their own
   table's rules in the full-width view (the design doc's original "table
   tabs" idea, realized per user request); a section with rules of several
@@ -120,9 +121,10 @@ full-width column overview:
 - **Top bar**: host selector + current-host / modified indicator + `db` button
 - **Tabs**: Rules (filter) | NAT | Mangle | Global | db
 - **Rules tab**: custom full-width view (`rulesview.py`); sections as
-  full-width header bars (DataTable cannot span cells); rules as 9 columns;
-  manual scroll offset; collapsible sections with `▸`/`▾`; the raw rule
-  text of the highlighted row in the status bar.
+  full-width header bars (DataTable cannot span cells); rules as 8 columns
+  (no table column — the tab defines the table); manual scroll offset;
+  collapsible sections with `▸`/`▾`; the raw rule text of the highlighted
+  row in the status bar.
 - **NAT / Mangle tabs**: the same full-width view populated with only the
   rules of that table (three `RulesView` instances, one per table tab);
   sections are shared across tabs and shown where they have rules;
