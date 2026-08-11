@@ -77,10 +77,17 @@ Working features (all in `fwtui/`):
   port | action | target`); function args shown as-is, not resolved IPs;
   manual scrolling; mouse support; the status bar shows the raw rule text
   of the selected row.
+- **Table tabs**: Rules (filter) / NAT / Mangle each show only their own
+  table's rules in the full-width view (the design doc's original "table
+  tabs" idea, realized per user request); a section with rules of several
+  tables appears in each relevant tab. Sections empty for the current tab
+  are hidden by default; `O` reveals them so a rule can be added to an
+  existing (for this table empty) section. `o` toggles all headers
+  open/closed.
 - Implicit rules from `[global]` are shown as dimmed, non-editable groups
-  in the position they occupy in the real deployed ruleset (verified
-  against a manifest run): loopback / related-and-established / icmp-drop
-  at the top, icmp-allow / log / policy at the bottom.
+  in the Rules tab in the position they occupy in the real deployed ruleset
+  (verified against a manifest run): loopback / related-and-established /
+  icmp-drop at the top, icmp-allow / log / policy at the bottom.
 - Global tab: key/value table, dropdowns for fixed-value keys, add/edit/
   delete.
 - db view: collapsible sections (default collapsed), enter edits an entry,
@@ -111,11 +118,15 @@ The original 3-column split (hosts | sections | rules) was replaced with a
 full-width column overview:
 
 - **Top bar**: host selector + current-host / modified indicator + `db` button
-- **Tabs**: Rules | Global | db
+- **Tabs**: Rules (filter) | NAT | Mangle | Global | db
 - **Rules tab**: custom full-width view (`rulesview.py`); sections as
   full-width header bars (DataTable cannot span cells); rules as 9 columns;
   manual scroll offset; collapsible sections with `▸`/`▾`; the raw rule
   text of the highlighted row in the status bar.
+- **NAT / Mangle tabs**: the same full-width view populated with only the
+  rules of that table (three `RulesView` instances, one per table tab);
+  sections are shared across tabs and shown where they have rules;
+  `O` toggles the display of sections empty for the active tab.
 - **Implicit rules**: not a section — the `[global]` settings are a separate
   Global tab, and the Rules tab shows what they generate as dimmed groups in
   their real chain position.
@@ -150,6 +161,11 @@ New modules from the redesign: `columns.py` (rule -> column parser),
 - 2026-08-09 — commits `ff971e2`, `d0e2f07`, `ff4d8ba`: the full-width
   overview, deploy env vars moved to the config file, and the
   `~/.firewall-tui.conf` override support.
+- 2026-08-10 — per-table tabs (Rules/filter, NAT, Mangle): each tab shows
+  only its own table's rules; sections with rules of several tables appear
+  in each relevant tab; `o` toggles all headers open/closed and `O` toggles
+  the display of sections empty for the active tab (so rules can be added
+  to an existing section that has no rules in the current view).
 - Deployment on the cdist server: `/home/cdist/firewall-tui` (git repo,
   same remote as this repository), per-user config
   `/home/cdist/.firewall-tui.conf` overriding `deploy_command` to

@@ -13,6 +13,15 @@ Row model (list of tuples):
     ("implicit-section", name)
     ("rule", line, section_name, cols_dict)
     ("implicit", cols_dict)
+
+Keys:
+    space  toggle one header
+    o      toggle all headers open/closed
+    O      toggle visibility of headers with no rules in this view
+
+When hide_empty is on (default), header rows whose section has no rules in
+this view are hidden entirely; 'O' reveals them so rules can be added to an
+existing (for this table empty) section.
 """
 
 from __future__ import annotations
@@ -57,8 +66,8 @@ class RulesView(Widget, can_focus=True):
         Binding("home", "move(-100000)", "Top", show=False),
         Binding("end", "move(100000)", "Bottom", show=False),
         Binding("space", "toggle_collapse", "Collapse/expand", show=False),
-        Binding("c", "collapse_all", "Collapse all", show=False),
-        Binding("o", "expand_all", "Expand all", show=False),
+        Binding("o", "toggle_all", "Toggle all", show=False),
+        Binding("O", "toggle_empty", "Toggle empty", show=False),
         Binding("enter", "activate", "Edit", show=False),
         Binding("ctrl+up", "move_up", "Move up", show=False),
         Binding("ctrl+down", "move_down", "Move down", show=False),
@@ -95,8 +104,9 @@ class RulesView(Widget, can_focus=True):
     class WidthsChanged(Message):
         """Posted when the column widths change (keep the header in sync)."""
 
-        def __init__(self, widths: list[int]) -> None:
+        def __init__(self, view: "RulesView", widths: list[int]) -> None:
             super().__init__()
+            self.view = view
             self.widths = widths
 
     def __init__(self, *args, **kwargs) -> None:
@@ -104,6 +114,7 @@ class RulesView(Widget, can_focus=True):
         self.all_rows: list[tuple] = []   # full row list from set_rows
         self.rows: list[tuple] = []       # visible rows (collapsed sections hidden)
         self.collapsed: set[str] = set()  # section names that are collapsed
+        self.hide_empty = True  # hide headers with no rules in this view
         self._initialized = False
         self.filter_text = ""
         self.selected = 0
@@ -135,19 +146,54 @@ class RulesView(Widget, can_focus=True):
         self.refresh()
         self.post_message(self.SelectionChanged(0))
 
+    def _contentful_keys(self) -> set[str]:
+        """Keys of header rows that have at least one rule in this view.
+
+        A section is contentful when any rule row belongs to it (matched by
+        name + source file); an include bar is contentful when a section
+        inside it (transitively, via the include stack) is."""
+        sections = {(row[2], row[1].source) for row in self.all_rows
+                    if row[0] == "rule"}
+        contentful: set[str] = set()
+        stack: list[tuple[str, str]] = []  # (included file path, key)
+        for row in self.all_rows:
+            kind = row[0]
+            if kind == "include":
+                stack.append((row[2] or "", self._key(row)))
+            elif kind == "section":
+                while stack and stack[-1][0] != (row[2] or ""):
+                    stack.pop()
+                if (row[1], row[2]) in sections:
+                    contentful.add(self._key(row))
+                    for _, key in stack:
+                        contentful.add(key)
+            elif kind == "implicit-section":
+                contentful.add(self._key(row))
+        return contentful
+
     def _rebuild_visible(self) -> None:
         """Recompute visible rows; collapsed sections and include groups hide
         their content. A stack tracks nested include groups by source file.
-        A filter hides non-matching rows (sections with matching rules stay)."""
+        A filter hides non-matching rows (sections with matching rules stay).
+        When hide_empty is on, headers without rules in this view are hidden
+        entirely (so each table tab only shows sections it has rules for)."""
         self.rows = []
         stack: list[tuple[str, bool]] = []  # (included file path, hidden)
         section_hidden = False
         matching = self._matching_sections()
+        contentful = self._contentful_keys() if self.hide_empty else None
         for row in self.all_rows:
             kind = row[0]
             if kind == "include":
+                key = self._key(row)
                 if row[2]:
-                    stack.append((row[2], self._key(row) in self.collapsed))
+                    stack.append((row[2], key in self.collapsed
+                                  or (contentful is not None
+                                      and key not in contentful)))
+                # missing includes always show (warning state); resolved
+                # includes with no rules in this view are hidden like sections
+                if contentful is not None and key not in contentful and row[2]:
+                    continue
                 self.rows.append(row)
                 continue
             if kind == "section":
@@ -157,6 +203,11 @@ class RulesView(Widget, can_focus=True):
                 group_hidden = any(h for _, h in stack)
                 filtered = (matching is not None
                             and (row[1], row[2]) not in matching)
+                empty = (contentful is not None
+                         and self._key(row) not in contentful)
+                if empty:
+                    section_hidden = True  # no rules under it either
+                    continue
                 section_hidden = (row[1] in self.collapsed) or group_hidden \
                     or filtered
                 self.rows.append(row)
@@ -205,7 +256,7 @@ class RulesView(Widget, can_focus=True):
         new = self._compute_widths()
         if new != self.col_widths:
             self.col_widths = new
-            self.post_message(self.WidthsChanged(new))
+            self.post_message(self.WidthsChanged(self, new))
 
     def on_resize(self, event) -> None:
         self._recompute_widths()
@@ -239,16 +290,24 @@ class RulesView(Widget, can_focus=True):
             self.refresh()
             self.post_message(self.SelectionChanged(self.selected))
 
-    def action_collapse_all(self) -> None:
-        self.collapsed = {self._key(r) for r in self.all_rows
-                          if r[0] in ("section", "implicit-section",
-                                      "include")}
+    def action_toggle_all(self) -> None:
+        """o: toggle the open/closed state of all headers (all collapsed ->
+        expand all; anything open -> collapse all)."""
+        keys = {self._key(r) for r in self.all_rows
+                if r[0] in ("section", "implicit-section", "include")}
+        if keys and keys <= self.collapsed:
+            self.collapsed = set()  # all collapsed: expand everything
+        else:
+            self.collapsed = keys  # collapse everything
         self._rebuild_visible()
         self.refresh()
         self.post_message(self.SelectionChanged(self.selected))
 
-    def action_expand_all(self) -> None:
-        self.collapsed = set()
+    def action_toggle_empty(self) -> None:
+        """O: toggle visibility of headers that have no rules in this view.
+        Reveals sections that are empty for the current table tab, so a rule
+        can be added to them."""
+        self.hide_empty = not self.hide_empty
         self._rebuild_visible()
         self.refresh()
         self.post_message(self.SelectionChanged(self.selected))

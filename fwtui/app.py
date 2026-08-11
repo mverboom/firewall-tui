@@ -2,8 +2,11 @@
 
 Layout:
   top bar : host selector
-  tabs    : Rules  - full-width column overview, sections as groups,
-                     implicit rules from [global] shown non-editable
+  tabs    : Rules  - filter rules, full-width column overview, sections as
+                     groups, implicit rules from [global] shown non-editable
+            NAT    - nat rules only (sections with both filter and nat rules
+                     appear in both tabs)
+            Mangle - mangle rules only
             Global - the [global] settings (implicit)
             db     - shared definitions (services, hosts, networks, groups)
 
@@ -11,8 +14,10 @@ Keys:
   a        add rule / db entry / global key (context dependent)
   e        edit selected rule / section / db entry / global key
   d        delete selected rule / section / db entry / global key
-  n        new section (rules tab)
+  n        new section (rules / nat / mangle tab)
   v        validate current ruleset
+  o        toggle all section headers open/closed
+  O        toggle visibility of headers empty for the current tab
   ctrl+s   save current file
   q        quit
 """
@@ -1215,8 +1220,8 @@ class FirewallApp(App):
     #db-view { height: 1fr; display: none; }
     TabbedContent { height: 1fr; }
     DataTable { height: 1fr; }
-    #rules-header { height: 1; text-style: bold; background: $panel; }
-    #rules-view { height: 1fr; }
+    #rules-header, #nat-header, #mangle-header { height: 1; text-style: bold; background: $panel; }
+    #rules-view, #nat-view, #mangle-view { height: 1fr; }
     #statusbar { height: 1; background: $panel; color: $text; padding: 0 1; }
     .field { margin: 0 1 1 1; }
     #builder { width: 55%; }
@@ -1272,6 +1277,8 @@ class FirewallApp(App):
         self.current_host: str | None = None
         self.current_dbsection: str | None = None
         self.rules_view: RulesView | None = None
+        self.nat_view: RulesView | None = None
+        self.mangle_view: RulesView | None = None
         self.db_view: DbView | None = None
         self.dbrowmap: dict = {}    # db table: row_key -> kind info
         self.dirty = False
@@ -1292,6 +1299,12 @@ class FirewallApp(App):
                 with TabPane("Rules", id="tab-rules"):
                     yield Static("", id="rules-header", classes="colheader")
                     yield RulesView(id="rules-view")
+                with TabPane("NAT", id="tab-nat"):
+                    yield Static("", id="nat-header", classes="colheader")
+                    yield RulesView(id="nat-view")
+                with TabPane("Mangle", id="tab-mangle"):
+                    yield Static("", id="mangle-header", classes="colheader")
+                    yield RulesView(id="mangle-view")
                 with TabPane("Global", id="tab-global"):
                     yield NavDataTable(id="global-table", zebra_stripes=True,
                                        cursor_type="row")
@@ -1303,9 +1316,12 @@ class FirewallApp(App):
         self._load_hosts()
         self._load_db()
         self.rules_view = self.query_one("#rules-view", RulesView)
+        self.nat_view = self.query_one("#nat-view", RulesView)
+        self.mangle_view = self.query_one("#mangle-view", RulesView)
         self.host_select = self.query_one("#host-select", Select)
         self.tabs = self.query_one("#tabs", TabbedContent)
-        self.query_one("#rules-header", Static).update(header_text())
+        for wid in ("#rules-header", "#nat-header", "#mangle-header"):
+            self.query_one(wid, Static).update(header_text())
         self.query_one("#filter-bar", Input).add_class("-textual-compact")
         gt = self.query_one("#global-table", DataTable)
         gt.add_column("Option", width=16)
@@ -1390,15 +1406,32 @@ class FirewallApp(App):
 
     # -- table population ---------------------------------------------------
     def _populate_rules(self, reset_collapsed: bool = False) -> None:
+        """Populate the three table tabs (Rules/filter, NAT, Mangle). Each
+        tab shows only its own table's rules; implicit [global] rules are
+        filter-only and appear in the Rules tab."""
+        self.rules_view.set_rows(
+            self._build_rows({"filter"}), reset_collapsed=reset_collapsed)
+        self.nat_view.set_rows(
+            self._build_rows({"nat"}), reset_collapsed=reset_collapsed)
+        self.mangle_view.set_rows(
+            self._build_rows({"mangle"}), reset_collapsed=reset_collapsed)
+
+    def _build_rows(self, tables: set[str]) -> list[tuple]:
+        """Rows for one table tab: implicit filter sections (Rules tab only),
+        real sections, and the rules of this table within them. Sections are
+        included even when empty for this table (the view's hide_empty flag
+        decides whether they show)."""
         rows: list[tuple] = []
         globals_ = {l.key: l.value for l in parser.global_lines(self.lines)}
-        top_groups, bottom_groups = implicit.implicit_rules(globals_)
-        # implicit rules that come FIRST in the chain (loopback, established,
-        # icmp drop when disabled)
-        for group, rdicts in top_groups:
-            rows.append(("implicit-section", group))
-            for r in rdicts:
-                rows.append(("implicit", r))
+        show_implicit = "filter" in tables
+        if show_implicit:
+            top_groups, bottom_groups = implicit.implicit_rules(globals_)
+            # implicit rules that come FIRST in the chain (loopback,
+            # established, icmp drop when disabled)
+            for group, rdicts in top_groups:
+                rows.append(("implicit-section", group))
+                for r in rdicts:
+                    rows.append(("implicit", r))
         # real sections (and [#include] bars), walking the spliced line list
         for l in self.lines:
             if l.kind == "include":
@@ -1411,16 +1444,18 @@ class FirewallApp(App):
             if l.kind == "section":
                 rows.append(("section", l.name, l.source))
                 for r in parser.rules_in_section(self.lines, l):
+                    if r.table not in tables:
+                        continue
                     cols = columns.rule_columns(r.value, self.db)
                     cols["table"] = r.table
                     rows.append(("rule", r, l.name, cols))
         # implicit rules that come LAST (icmp allow, log, policy)
-        for group, rdicts in bottom_groups:
-            rows.append(("implicit-section", group))
-            for r in rdicts:
-                rows.append(("implicit", r))
-        if self.rules_view:
-            self.rules_view.set_rows(rows, reset_collapsed=reset_collapsed)
+        if show_implicit:
+            for group, rdicts in bottom_groups:
+                rows.append(("implicit-section", group))
+                for r in rdicts:
+                    rows.append(("implicit", r))
+        return rows
 
     def _populate_global(self) -> None:
         """Show every global key: file values, or the manifest default for
@@ -1520,6 +1555,17 @@ class FirewallApp(App):
         tab = self.query_one("#tabs", TabbedContent).active or ""
         return tab.split("-", 1)[1] if tab.startswith("tab-") else "rules"
 
+    def _active_rules_view(self) -> RulesView | None:
+        """The RulesView of the active table tab (Rules/NAT/Mangle), else None."""
+        tab = self._active_tab()
+        if tab == "rules":
+            return self.rules_view
+        if tab == "nat":
+            return self.nat_view
+        if tab == "mangle":
+            return self.mangle_view
+        return None
+
     # -- keyboard navigation ------------------------------------------------
     def on_key(self, event) -> None:
         """Vertical navigation: host-select <-> tabs <-> content."""
@@ -1557,7 +1603,7 @@ class FirewallApp(App):
             self._set_db_mode(False, refocus=False)
 
     def _focus_tabs(self) -> None:
-        """Focus the tab strip (Rules | Global)."""
+        """Focus the tab strip (Rules | NAT | Mangle | Global)."""
         self.tabs.query_one(ContentTabs).focus()
 
     def _focus_content(self) -> None:
@@ -1567,8 +1613,10 @@ class FirewallApp(App):
                 self.db_view.focus()
             return
         tab = self._active_tab()
-        if tab == "rules":
-            self.rules_view.focus()
+        if tab in ("rules", "nat", "mangle"):
+            view = self._active_rules_view()
+            if view:
+                view.focus()
         elif tab == "global":
             self.query_one("#global-table", DataTable).focus()
 
@@ -1598,7 +1646,7 @@ class FirewallApp(App):
 
     def on_rules_view_activate(self, event) -> None:
         """Enter pressed on a rule: open the editor (like 'e')."""
-        if self._active_tab() == "rules":
+        if self._active_tab() in ("rules", "nat", "mangle"):
             self._edit_rule()
 
     def on_rules_view_navigate_up(self, event) -> None:
@@ -1619,7 +1667,8 @@ class FirewallApp(App):
         if self.db_mode:
             current = self.db_view.filter_text if self.db_view else ""
         else:
-            current = self.rules_view.filter_text if self.rules_view else ""
+            view = self._active_rules_view()
+            current = view.filter_text if view else ""
         bar.value = current
         bar.add_class("-show")
         bar.focus()
@@ -1633,8 +1682,9 @@ class FirewallApp(App):
                 if self.db_view:
                     self.db_view.set_filter("")
             else:
-                if self.rules_view:
-                    self.rules_view.set_filter("")
+                view = self._active_rules_view()
+                if view:
+                    view.set_filter("")
         self._update_status()
         self._focus_content()
 
@@ -1645,8 +1695,9 @@ class FirewallApp(App):
                 if self.db_view:
                     self.db_view.set_filter(event.value)
             else:
-                if self.rules_view:
-                    self.rules_view.set_filter(event.value)
+                view = self._active_rules_view()
+                if view:
+                    view.set_filter(event.value)
             self._update_status()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -1679,11 +1730,12 @@ class FirewallApp(App):
                 return None, None
             idx = self.db_view.selected
             return idx, self.db_view.rows[idx]
-        if self._active_tab() == "rules":
-            if not self.rules_view or not self.rules_view.rows:
+        if self._active_tab() in ("rules", "nat", "mangle"):
+            view = self._active_rules_view()
+            if not view or not view.rows:
                 return None, None
-            idx = self.rules_view.selected
-            return idx, self.rules_view.rows[idx]
+            idx = view.selected
+            return idx, view.rows[idx]
         return None, None
 
     # -- add / edit / delete ------------------------------------------------
@@ -1692,7 +1744,7 @@ class FirewallApp(App):
             self._add_db_entry()
             return
         tab = self._active_tab()
-        if tab == "rules":
+        if tab in ("rules", "nat", "mangle"):
             self._add_rule()
         elif tab == "global":
             self._add_global()
@@ -1725,9 +1777,13 @@ class FirewallApp(App):
             self.notify("No section to add a rule to; press 'n' to create one",
                         severity="warning")
             return
-        if self.rules_view:
-            self.rules_view.expand_section(section)
-        self.push_screen(RuleEditor("filter", "4", db=self.db,
+        view = self._active_rules_view()
+        if view:
+            view.expand_section(section)
+        # new rules default to the active tab's table
+        default_table = {"rules": "filter", "nat": "nat",
+                         "mangle": "mangle"}.get(self._active_tab(), "filter")
+        self.push_screen(RuleEditor(default_table, "4", db=self.db,
                                     ifaces=self._current_ifaces()),
                          lambda res, s=section, src=section_source:
                          self._on_rule_edited(s, src, res))
@@ -1754,15 +1810,15 @@ class FirewallApp(App):
                 break
         self.dirty = True
         self._populate_rules()
-        if self.rules_view:
-            self.rules_view.select_line(new_line)
+        # jump to the tab of the rule's table and select it there
+        self._jump_to_rule(new_line, section)
 
     def action_edit(self) -> None:
         if self.db_mode:
             self._edit_db_entry()
             return
         tab = self._active_tab()
-        if tab == "rules":
+        if tab in ("rules", "nat", "mangle"):
             self._edit_rule()
         elif tab == "global":
             self._edit_global()
@@ -1784,12 +1840,14 @@ class FirewallApp(App):
             return
         if kind == "rule":
             line = info[1]
+            section = info[2]
             self.push_screen(RuleEditor(line.table, line.proto, line.value,
                                         db=self.db,
                                         ifaces=self._current_ifaces()),
-                             lambda res, ln=line: self._on_rule_edited_existing(ln, res))
+                             lambda res, ln=line, s=section:
+                             self._on_rule_edited_existing(ln, s, res))
 
-    def _on_rule_edited_existing(self, line, result) -> None:
+    def _on_rule_edited_existing(self, line, section, result) -> None:
         if not result:
             return
         self._snapshot()
@@ -1800,8 +1858,7 @@ class FirewallApp(App):
         line.raw = line.render()
         self.dirty = True
         self._populate_rules()
-        if self.rules_view:
-            self.rules_view.select_line(line)
+        self._jump_to_rule(line, section)
 
     def _on_rename_section(self, old: str, src: str, name) -> None:
         if not name:
@@ -1814,15 +1871,16 @@ class FirewallApp(App):
                 break
         self.dirty = True
         self._populate_rules()
-        if self.rules_view:
-            self.rules_view.select_section(name, src)
+        view = self._active_rules_view()
+        if view:
+            view.select_section(name, src)
 
     def action_delete(self) -> None:
         if self.db_mode:
             self._delete_db_entry()
             return
         tab = self._active_tab()
-        if tab == "rules":
+        if tab in ("rules", "nat", "mangle"):
             self._delete_rule()
         elif tab == "global":
             self._delete_global()
@@ -1882,23 +1940,24 @@ class FirewallApp(App):
 
     def on_rules_view_move_request(self, event) -> None:
         """ctrl+up/down: move the selected rule or section."""
-        if self._active_tab() != "rules":
+        if self._active_tab() not in ("rules", "nat", "mangle"):
             return
         rk, info = self._selected_row()
         if not info:
             return
+        view = self._active_rules_view()
         kind = info[0]
         if kind == "rule":
             moved = self._move_rule(info[1], event.direction)
-            if moved and self.rules_view:
-                self.rules_view.select_line(moved)
+            if moved and view:
+                view.select_line(moved)
         elif kind == "section":
             for l in self.lines:
                 if (l.kind == "section" and l.name == info[1]
                         and l.source == info[2]):
                     moved = self._move_section(l, event.direction)
-                    if moved and self.rules_view:
-                        self.rules_view.select_section(l.name, l.source)
+                    if moved and view:
+                        view.select_section(l.name, l.source)
                     break
         elif kind in ("implicit", "implicit-section"):
             self.notify("Implicit rules cannot be reordered",
@@ -1987,8 +2046,9 @@ class FirewallApp(App):
         self.lines = new_lines
 
     def action_new_section(self) -> None:
-        if self._active_tab() != "rules":
-            self.notify("'n' works in the Rules tab", severity="warning")
+        if self._active_tab() not in ("rules", "nat", "mangle"):
+            self.notify("'n' works in the Rules, NAT and Mangle tabs",
+                        severity="warning")
             return
         self.push_screen(Prompt("New section name",
                                 placeholder="e.g. allow ssh from admin"),
@@ -2257,13 +2317,16 @@ class FirewallApp(App):
                 break
 
     def _jump_to_rule(self, line, section) -> None:
-        """Switch to the Rules tab and select the given rule line."""
+        """Switch to the tab of the rule's table and select the given rule."""
+        tab = {"nat": "tab-nat", "mangle": "tab-mangle"}.get(
+            line.table, "tab-rules")
         self._set_db_mode(False)
-        self.query_one("#tabs", TabbedContent).active = "tab-rules"
-        if self.rules_view:
-            self.rules_view.set_filter("")  # clear any active filter
-            self.rules_view.expand_section(section)
-            self.rules_view.select_line(line)
+        self.query_one("#tabs", TabbedContent).active = tab
+        view = self._active_rules_view()
+        if view:
+            view.set_filter("")  # clear any active filter
+            view.expand_section(section)
+            view.select_line(line)
         self._focus_content()
 
     def action_preview(self) -> None:
@@ -2462,20 +2525,27 @@ class FirewallApp(App):
     def _update_status(self) -> None:
         sb = self.query_one("#statusbar", Static)
         filt = ""
-        if self.rules_view and self.rules_view.filter_text:
-            filt = f"  [filter: {self.rules_view.filter_text}]"
+        view = self._active_rules_view()
+        if view and view.filter_text:
+            filt = f"  [filter: {view.filter_text}]"
         if self.db_view and self.db_view.filter_text:
             filt += f"  [db filter: {self.db_view.filter_text}]"
+        empty_hint = "O=show empty"
+        if view is not None and not view.hide_empty:
+            empty_hint = "O=hide empty"
         sb.update(
-            f"a=add e=edit d=delete n=new section space=collapse c=collapse all "
-            f"o=expand all enter=edit v=validate g=preview p=deploy i=git history "
-            f"/=filter ctrl+z=undo ctrl+s=save q=quit   esc=menu{filt}")
+            f"a=add e=edit d=delete n=new section space=collapse o=toggle all "
+            f"{empty_hint} enter=edit v=validate g=preview p=deploy i=git "
+            f"history /=filter ctrl+z=undo ctrl+s=save q=quit   esc=menu{filt}")
 
     def on_rules_view_selection_changed(self, event) -> None:
         """Show the raw rule text of the selected rule in the status bar."""
-        if self._active_tab() != "rules" or not self.rules_view:
+        if self._active_tab() not in ("rules", "nat", "mangle"):
             return
-        rows = self.rules_view.rows
+        view = self._active_rules_view()
+        if not view:
+            return
+        rows = view.rows
         if event.row_index < len(rows):
             info = rows[event.row_index]
             if info[0] == "rule":
@@ -2486,9 +2556,11 @@ class FirewallApp(App):
         self._update_status()
 
     def on_rules_view_widths_changed(self, event) -> None:
-        """Column widths changed: keep the header line in sync."""
-        self.query_one("#rules-header", Static).update(
-            header_text(event.widths))
+        """Column widths changed: keep the header line of that view in sync."""
+        wid = {"#rules-view": "#rules-header", "#nat-view": "#nat-header",
+               "#mangle-view": "#mangle-header"}.get(event.view.id)
+        if wid:
+            self.query_one(wid, Static).update(header_text(event.widths))
 
 
 def main() -> None:
