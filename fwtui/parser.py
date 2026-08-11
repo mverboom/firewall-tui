@@ -143,6 +143,7 @@ class DbLine:
 def parse_db(text: str) -> list[DbLine]:
     """Parse a db file into a list of DbLine objects."""
     lines: list[DbLine] = []
+    section = ""
     for raw in text.splitlines():
         line = DbLine(raw=raw)
         stripped = raw.strip()
@@ -153,11 +154,13 @@ def parse_db(text: str) -> list[DbLine]:
         elif stripped.startswith("[") and stripped.endswith("]"):
             line.kind = "section"
             line.section = stripped[1:-1].strip()
+            section = line.section
         elif "=" in stripped:
             key, value = stripped.split("=", 1)
             line.kind = "entry"
             line.key = key.strip()
             line.value = value.strip()
+            line.section = section
         else:
             line.kind = "unknown"
         lines.append(line)

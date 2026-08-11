@@ -7,6 +7,7 @@ aborting, so the TUI can show them inline.
 
 from __future__ import annotations
 
+import ipaddress
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -274,6 +275,101 @@ def _netlookup(name: str, db: Db, proto: int, errs: list[str],
     # the manifest aborts on this; report it as an error
     errs.append(f"Network '{name}' not found in db for IPv{proto}")
     return name
+
+
+# ---------------------------------------------------------------------------
+# db entry validation
+# ---------------------------------------------------------------------------
+
+def validate_db_value(section: str, value: str, db: Db | None = None) -> list[str]:
+    """Validate a db entry value for its section. Returns error messages
+    (empty = valid). @command values are not validated (their output is only
+    known at runtime); group lists are checked against the db when given."""
+    if not value:
+        return ["value is empty"]
+    if value.startswith("@"):
+        return []
+    if section == "services":
+        return _validate_service_value(value)
+    if section == "hosts":
+        return _validate_ip_list(value)
+    if section == "networks":
+        return _validate_network_list(value)
+    if section in ("servicegroups", "hostgroups", "networkgroups"):
+        table = {"servicegroups": "services", "hostgroups": "hosts",
+                 "networkgroups": "networks"}[section]
+        return _validate_group_list(value, db, table)
+    return []
+
+
+def _validate_service_value(value: str) -> list[str]:
+    """services: name=port/proto, or icmp[/type]."""
+    if value == "icmp":
+        return []
+    if value.startswith("icmp/"):
+        if not value.split("/", 1)[1]:
+            return ["icmp type is missing (use icmp or icmp/<type>)"]
+        return []
+    if "/" not in value:
+        return ["expected '<port>/<proto>' (e.g. 22/tcp) or icmp[/<type>]"]
+    port, proto = value.split("/", 1)
+    errs = []
+    if not (re.fullmatch(r"\d+", port) or re.fullmatch(r"\d+:\d+", port)):
+        errs.append(f"invalid port '{port}' (use e.g. 22 or 1000:2000)")
+    if not proto or any(c.isspace() for c in proto):
+        errs.append(f"invalid protocol '{proto}'")
+    return errs
+
+
+def _validate_ip_list(value: str) -> list[str]:
+    """hosts: name=IP [IP...] (v4 and/or v6)."""
+    errs = []
+    for tok in value.split():
+        if not _is_ip_or_cidr(tok):
+            errs.append(f"'{tok}' is not a valid IP address")
+    return errs
+
+
+def _validate_network_list(value: str) -> list[str]:
+    """networks: name=network/mask [network...]."""
+    errs = []
+    for tok in value.split():
+        if "/" not in tok:
+            errs.append(f"'{tok}' is missing a mask (use e.g. 192.168.0.0/24)")
+            continue
+        try:
+            ipaddress.ip_network(tok, strict=False)
+        except ValueError:
+            errs.append(f"'{tok}' is not a valid network/mask "
+                        "(e.g. 192.168.0.0/24)")
+    return errs
+
+
+def _is_ip_or_cidr(token: str) -> bool:
+    try:
+        ipaddress.ip_address(token)
+        return True
+    except ValueError:
+        pass
+    try:
+        ipaddress.ip_network(token, strict=False)
+        return True
+    except ValueError:
+        return False
+
+
+def _validate_group_list(value: str, db: Db | None, table: str) -> list[str]:
+    """servicegroups/hostgroups/networkgroups: comma-separated member names."""
+    errs = []
+    toks = [t.strip() for t in value.split(",")]
+    if any(not t for t in toks):
+        errs.append("empty name in comma-separated list")
+    if db is not None:
+        known = getattr(db, table, {})
+        for t in toks:
+            if t and t not in known:
+                errs.append(f"unknown {table.rstrip('s')} '{t}'")
+    return errs
 
 
 # ---------------------------------------------------------------------------

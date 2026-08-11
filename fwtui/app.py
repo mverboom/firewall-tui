@@ -579,7 +579,8 @@ class RuleEditor(ModalScreen):
                            "networkgroups", "servicegroups"):
             self.notify(f"Unknown db section '{section}'", severity="error")
             return
-        self.app._add_db_entry_direct(section, key, value)
+        if not self.app._add_db_entry_direct(section, key, value):
+            return  # validation failed (notification already shown)
         # refresh this editor's db and dropdowns
         self.db = self.app.db
         self.services = list(self.db.services)
@@ -706,6 +707,94 @@ class Prompt(ModalScreen):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+
+class DbEntryEditor(ModalScreen):
+    """Add/edit a db entry with separate name and value fields.
+
+    Values are validated per section (services, IPs, networks, groups)
+    before saving; errors are shown inline and the modal stays open. Enter
+    in the name field moves to the value field, enter in the value field
+    saves."""
+
+    CSS = """
+    DbEntryEditor #db-error { color: $error; }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("ctrl+s", "save", "Save"),
+        Binding("s", "save", "Save", show=False),
+    ]
+
+    def __init__(self, section: str, key: str = "", value: str = "",
+                 orig: "parser.DbLine | None" = None) -> None:
+        super().__init__()
+        self.section = section
+        self.key = key
+        self.value = value
+        self.orig = orig  # the DbLine being edited (None when adding)
+
+    def compose(self) -> ComposeResult:
+        verb = "Edit" if self.orig else "New"
+        yield Static(f"{verb} [{self.section}] entry", classes="modal-title")
+        yield Horizontal(Label("Name", classes="flabel"),
+                         Input(self.key, id="db-key",
+                               classes="finput -textual-compact"),
+                         classes="frow")
+        yield Horizontal(Label("Value", classes="flabel"),
+                         Input(self.value, id="db-value",
+                               placeholder="e.g. 192.168.0.0/24, 22/tcp, ...",
+                               classes="finput -textual-compact"),
+                         classes="frow")
+        yield Static("", id="db-error", classes="dberror")
+        with Horizontal(id="modal-buttons"):
+            yield Button("Save", variant="primary", id="btn-save")
+            yield Button("Cancel", id="btn-cancel")
+
+    def on_mount(self) -> None:
+        for w in self.query(".finput"):
+            w.add_class("-textual-compact")
+        self.query_one("#db-key").focus()
+
+    def _validate(self, key: str, value: str) -> list[str]:
+        errs = []
+        if not key:
+            errs.append("name is empty")
+        for l in self.app.dblines:
+            if (l.kind == "entry" and l.section == self.section
+                    and l.key == key and l is not self.orig):
+                errs.append(f"'{key}' already exists in [{self.section}]")
+                break
+        errs.extend(expand.validate_db_value(self.section, value, self.app.db))
+        return errs
+
+    def action_save(self) -> None:
+        key = self.query_one("#db-key", Input).value.strip()
+        value = self.query_one("#db-value", Input).value.strip()
+        errs = self._validate(key, value)
+        if errs:
+            # escape: section names like [networks] are rich markup
+            self.query_one("#db-error", Static).update(
+                escape("\n".join(errs)))
+            return
+        self.dismiss({"key": key, "value": value})
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-save":
+            self.action_save()
+        elif event.button.id == "btn-cancel":
+            self.action_cancel()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        """Enter: name field moves to the value field, value field saves."""
+        if event.input.id == "db-key":
+            self.query_one("#db-value", Input).focus()
+        else:
+            self.action_save()
 
 
 class CommitSelect(NavSelect):
@@ -2190,8 +2279,20 @@ class FirewallApp(App):
         self._populate_rules()
 
     # -- db tab -------------------------------------------------------------
-    def _add_db_entry_direct(self, section: str, key: str, value: str) -> None:
-        """Add a db entry (used from the rule editor)."""
+    def _add_db_entry_direct(self, section: str, key: str, value: str) -> bool:
+        """Add a db entry (used from the rule editor). Validates first;
+        returns True when the entry was added."""
+        errs = []
+        if not key:
+            errs.append("name is empty")
+        for l in self.dblines:
+            if l.kind == "entry" and l.section == section and l.key == key:
+                errs.append(f"'{key}' already exists in [{section}]")
+                break
+        errs.extend(expand.validate_db_value(section, value, self.db))
+        if errs:
+            self.notify("; ".join(errs), severity="error")
+            return False
         self._snapshot()
         for i, l in enumerate(self.dblines):
             if l.kind == "section" and l.section == section:
@@ -2206,6 +2307,7 @@ class FirewallApp(App):
         self.dirty = True
         self._rebuild_db()
         self._populate_db()
+        return True
 
     def _add_db_entry(self) -> None:
         rk, info = self._selected_row()
@@ -2221,16 +2323,13 @@ class FirewallApp(App):
             self.notify("db file has no sections", severity="warning")
             return
         self.current_dbsection = section
-        self.push_screen(Prompt(f"New {section} entry (key=value)",
-                                placeholder="name=value"),
-                         self._on_db_entry)
+        self.push_screen(DbEntryEditor(section), self._on_db_entry)
 
-    def _on_db_entry(self, kv) -> None:
-        if not kv or "=" not in kv:
+    def _on_db_entry(self, result) -> None:
+        if not result:
             return
         self._snapshot()
-        key, value = kv.split("=", 1)
-        key, value = key.strip(), value.strip()
+        key, value = result["key"], result["value"]
         for i, l in enumerate(self.dblines):
             if l.kind == "section" and l.section == self.current_dbsection:
                 j = i
@@ -2262,16 +2361,16 @@ class FirewallApp(App):
             self.notify("Select a db entry to edit", severity="warning")
             return
         e = self.dblines[info[4]]
-        self.push_screen(Prompt(f"Edit {e.key}", value=f"{e.key}={e.value}"),
-                         lambda res, old=e: self._on_db_entry_edit(old, res))
+        self.push_screen(
+            DbEntryEditor(e.section, key=e.key, value=e.value, orig=e),
+            lambda res, old=e: self._on_db_entry_edit(old, res))
 
-    def _on_db_entry_edit(self, old, kv) -> None:
-        if not kv or "=" not in kv:
+    def _on_db_entry_edit(self, old, result) -> None:
+        if not result:
             return
         self._snapshot()
-        key, value = kv.split("=", 1)
-        old.key = key.strip()
-        old.value = value.strip()
+        old.key = result["key"]
+        old.value = result["value"]
         old.raw = old.render()
         self.dirty = True
         self._rebuild_db()

@@ -30,7 +30,10 @@ Documentation:
 - **Global tab**: key/value editor for the `[global]` settings, with
   dropdowns for keys that have a fixed value set (policy, established, ...)
 - **db button**: collapsible editor for services, hosts, networks and groups
-  (the db is global, not per-ruleset)
+  (the db is global, not per-ruleset). Add/edit uses a name + value form
+  with per-section validation: IPs (hosts), network/mask (networks),
+  port/proto or icmp[/type] (services), and group members checked against
+  the db; invalid values are rejected inline, `@command` values are exempt.
 - **Rule editor**: a builder form for the common patterns (chain, `-i`, `-s`,
   `-d`, `dservice`, action, DNAT/SNAT target, extra options) with a live
   raw-text preview; the raw text is authoritative and editable, and the two
