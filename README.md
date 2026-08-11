@@ -64,8 +64,17 @@ Documentation:
 ## Installation
 
 ```sh
+./init
+```
+
+The `init` script creates a venv (`./venv/`), installs textual (8.x), and
+verifies the app imports; it is safe to re-run (it only installs when
+needed). It also warns about the optional `dig` (dnsutils) and `git`
+requirements. Manually, that is:
+
+```sh
 python3 -m venv venv
-venv/bin/pip install textual
+venv/bin/pip install "textual>=8,<9"
 ```
 
 No other dependencies (stdlib only otherwise). The `./firewall-tui` launcher
@@ -209,6 +218,7 @@ fwtui/
   dbview.py     custom collapsible db view
   config.py     config file loading
 firewall-tui    launcher script
+init            setup script (creates the venv, installs textual)
 firewall-tui.conf  default configuration
 ```
 

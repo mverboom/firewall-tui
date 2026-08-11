@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Set up the venv and dependencies needed to run the firewall TUI.
+# Safe to re-run: creates the venv if missing, installs/upgrades textual
+# when needed, and verifies the app imports.
+
+set -u
+
+SELF="$(readlink -f "$0")"
+ROOT="$(dirname "$SELF")"
+VENV="$ROOT/venv"
+PYTHON="${PYTHON:-python3}"
+TEXTUAL_SPEC="textual>=8,<9"
+
+check_python() {
+   if ! command -v "$PYTHON" >/dev/null 2>&1; then
+      printf 'error: %s not found (need Python >= 3.10)\n' "$PYTHON" >&2
+      exit 1
+   fi
+   if ! "$PYTHON" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'; then
+      printf 'error: %s is too old (need Python >= 3.10)\n' "$PYTHON" >&2
+      exit 1
+   fi
+}
+
+create_venv() {
+   if [[ ! -x "$VENV/bin/python" ]]; then
+      printf 'creating venv at %s ...\n' "$VENV"
+      "$PYTHON" -m venv "$VENV" || exit 1
+   fi
+}
+
+install_textual() {
+   # textual must be present with major version 8 (the app is developed
+   # against 8.2.8; the spec pins <9 to avoid future breaking changes)
+   if ! "$VENV/bin/python" -c \
+      'import sys, textual; sys.exit(0 if textual.__version__.split(".")[0] == "8" else 1)' \
+      >/dev/null 2>&1; then
+      printf 'installing %s ...\n' "$TEXTUAL_SPEC"
+      "$VENV/bin/pip" install --quiet --upgrade "$TEXTUAL_SPEC" || exit 1
+   fi
+}
+
+verify_app() {
+   if ! "$VENV/bin/python" -c 'from fwtui.app import FirewallApp' >/dev/null 2>&1; then
+      printf 'error: the app failed to import in the venv\n' >&2
+      exit 1
+   fi
+}
+
+check_optional() {
+   command -v dig >/dev/null 2>&1 || \
+      printf 'note: dig (dnsutils) not found - DNS fallback during validation will not work\n'
+   command -v git >/dev/null 2>&1 || \
+      printf 'note: git not found - the git history view (i) will not work\n'
+}
+
+main() {
+   cd "$ROOT" || exit 1
+   check_python
+   create_venv
+   install_textual
+   verify_app
+   printf 'firewall TUI ready - run ./firewall-tui\n'
+   check_optional
+}
+
+main "$@"
