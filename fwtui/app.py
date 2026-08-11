@@ -188,22 +188,25 @@ class NavDataTable(DataTable):
 # rule editor modal (builder form + raw text)
 # ---------------------------------------------------------------------------
 
-ACTIONS = [
-    ("ACCEPT", "ACCEPT"),
-    ("DROP", "DROP"),
-    ("reject(reset)", "reject(reset)"),
-    ("reject(unreachable)", "reject(unreachable)"),
-    ("reject(prohibited)", "reject(prohibited)"),
-    ("log", "log"),
-    ("DNAT", "DNAT"),
-    ("SNAT", "SNAT"),
-    ("MASQUERADE", "MASQUERADE"),
-]
+# Per-table option sets for the rule editor: each tab only offers the
+# chains / targets that are valid in the table it edits, so a mistake like
+# a filter rule with -A PREROUTING or -j DNAT is impossible from the form.
+# (The raw text field still accepts anything, e.g. custom chains or MARK.)
+CHAINS_BY_TABLE = {
+    "filter": ["INPUT", "OUTPUT", "FORWARD"],
+    "nat": ["PREROUTING", "INPUT", "OUTPUT", "POSTROUTING"],
+    "mangle": ["PREROUTING", "INPUT", "FORWARD", "OUTPUT",
+               "POSTROUTING"],
+}
 
-CHAINS = [
-    ("INPUT", "INPUT"), ("OUTPUT", "OUTPUT"), ("FORWARD", "FORWARD"),
-    ("PREROUTING", "PREROUTING"), ("POSTROUTING", "POSTROUTING"),
-]
+ACTIONS_BY_TABLE = {
+    "filter": ["ACCEPT", "DROP", "reject(reset)", "reject(unreachable)",
+               "reject(prohibited)", "log"],
+    "nat": ["ACCEPT", "DROP", "reject(reset)", "reject(unreachable)",
+            "reject(prohibited)", "log", "DNAT", "SNAT", "MASQUERADE"],
+    "mangle": ["ACCEPT", "DROP", "reject(reset)", "reject(unreachable)",
+               "reject(prohibited)", "log"],
+}
 
 PROTOS = [("both (46)", "46"), ("IPv4", "4"), ("IPv6", "6")]
 
@@ -319,6 +322,16 @@ class RuleEditor(ModalScreen):
         return Horizontal(Label(label, classes="flabel"), widget,
                           classes=f"frow {classes}".strip())
 
+    def _chains(self) -> list[tuple[str, str]]:
+        """Chains valid in this editor's table (see CHAINS_BY_TABLE)."""
+        return [(c, c) for c in CHAINS_BY_TABLE.get(self.table,
+                                                    CHAINS_BY_TABLE["filter"])]
+
+    def _actions(self) -> list[tuple[str, str]]:
+        """Targets valid in this editor's table (see ACTIONS_BY_TABLE)."""
+        return [(a, a) for a in ACTIONS_BY_TABLE.get(self.table,
+                                                     ACTIONS_BY_TABLE["filter"])]
+
     def compose(self) -> ComposeResult:
         yield Static("Rule editor", classes="modal-title")
         with Horizontal():
@@ -327,7 +340,7 @@ class RuleEditor(ModalScreen):
                     PROTOS, value=self.proto, id="f-proto",
                     classes="fselect -textual-compact", allow_blank=False))
                 yield self._row("Chain", NavSelect(
-                    CHAINS, id="f-chain",
+                    self._chains(), id="f-chain",
                     classes="fselect -textual-compact", allow_blank=False))
                 yield self._row("Iface (-i)",
                     NavSelect(self._iface_options(), value="", id="f-iface",
@@ -348,7 +361,7 @@ class RuleEditor(ModalScreen):
                     value="", id="f-svc",
                     classes="fselect -textual-compact", allow_blank=False))
                 yield self._row("Action", NavSelect(
-                    ACTIONS, value="ACCEPT", id="f-action",
+                    self._actions(), value="ACCEPT", id="f-action",
                     classes="fselect -textual-compact", allow_blank=False))
                 yield self._row("To host", NavSelect(
                     [("(none)", "")] + [(f"host({h})", f"host({h})")
@@ -416,7 +429,9 @@ class RuleEditor(ModalScreen):
             self.text = raw
             m = re.search(r"-A\s+(\S+)", raw)
             if m:
-                self.query_one("#f-chain", Select).value = m.group(1)
+                # keep custom chains (user-defined, SECMARK, ...) as options
+                self._set_select_value(self.query_one("#f-chain", Select),
+                                       m.group(1))
             for flag, wid in (("-i", "#f-iface"), ("-s", "#f-src"),
                               ("-d", "#f-dst")):
                 m = re.search(rf"{flag}\s+(\S+)", raw)
@@ -447,9 +462,9 @@ class RuleEditor(ModalScreen):
                                        m.group(1))
             m = re.search(r"-j\s+(\S+)", raw)
             if m:
-                act = m.group(1)
-                if act in ("ACCEPT", "DROP", "DNAT", "SNAT", "MASQUERADE"):
-                    self.query_one("#f-action", Select).value = act
+                # keep custom targets (MARK, custom chains, ...) as options
+                self._set_select_value(self.query_one("#f-action", Select),
+                                       m.group(1))
             # function actions: reject(...) and log(prefix)
             m = re.search(r"reject\((reset|unreachable|prohibited)\)", raw)
             if m:

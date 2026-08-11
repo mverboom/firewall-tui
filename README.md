@@ -37,7 +37,11 @@ Documentation:
 - **Rule editor**: a builder form for the common patterns (chain, `-i`, `-s`,
   `-d`, `dservice`, action, DNAT/SNAT target, extra options) with a live
   raw-text preview; the raw text is authoritative and editable, and the two
-  sync both ways
+  sync both ways. The form only offers options valid in the current tab's
+  table: Chains are INPUT/OUTPUT/FORWARD in Rules, PREROUTING/INPUT/OUTPUT/
+  POSTROUTING in NAT (all five in Mangle), and the DNAT/SNAT/MASQUERADE
+  targets appear only in the NAT tab (custom chains/targets typed into the
+  raw text are preserved)
 - **Sections**: add, rename, delete, reorder (ctrl+up / ctrl+down); rules can
   be reordered within their section
 - **[#include] support**: include files are spliced inline, shown as amber
