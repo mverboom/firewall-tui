@@ -123,8 +123,8 @@ def expand_rule(text: str, db: Db, proto: int, log_prefix: str = "firewall") -> 
         funcname = expansion[: expansion.index("(")]
         args = expansion[expansion.index("(") + 1: -1]
 
-        # hostgroup/networkgroup: check for -s/-d before the function
-        if funcname in ("hostgroup", "networkgroup"):
+        # hostgroup/networkgroup/dns: check for -s/-d before the function
+        if funcname in ("hostgroup", "networkgroup", "dns"):
             prefix = rule[:pos].rstrip()
             if re.search(r"(^|\s)-[sd](\s|$)", prefix):
                 res.errors.append(
@@ -229,6 +229,11 @@ def _expand_one(funcname: str, args: str, db: Db, proto: int,
             errs.append(f"Hostgroup '{args}' not found in db")
             return args, errs, warns
         return f"-m set --match-set {proto}-ip-{args}", errs, warns
+
+    if funcname == "dns":
+        # DNS-resolved host: ipset match, contents managed by the periodic
+        # firewall-dns resolver. No db lookup; the name is a domain.
+        return f"-m set --match-set {proto}-dns-{args}", errs, warns
 
     if funcname == "network":
         net = _netlookup(args, db, proto, errs, warns)
