@@ -1653,7 +1653,7 @@ class FirewallApp(App):
         Binding("a", "add", "Add"),
         Binding("e", "edit", "Edit"),
         Binding("d", "delete", "Delete"),
-        Binding("u", "where_used", "Where used"),
+        Binding("w", "where_used", "Where used"),
         Binding("n", "new_section", "New section"),
         Binding("v", "validate", "Validate"),
         Binding("p", "preview", "Preview"),
@@ -2987,6 +2987,8 @@ class FirewallApp(App):
         self._set_db_mode(False)
         if host != self.current_host:
             self._load_ruleset(host)
+            # keep the host pulldown in sync with the loaded ruleset
+            self.host_select.value = host
         current = "(no section)"
         for l in self.lines:
             if l.kind == "section":
@@ -3288,7 +3290,7 @@ class FirewallApp(App):
             empty_hint = "O=hide empty"
         git_hint = "g=git " if self._git_available() else ""
         sb.update(
-            f"a=add e=edit d=delete u=where used n=new section "
+            f"a=add e=edit d=delete w=where used n=new section "
             f"space=collapse o=toggle all "
             f"{empty_hint} enter=edit v=validate p=preview D=deploy {git_hint}"
             f"/=filter ctrl+z=undo ctrl+s=save q=quit   esc=menu{filt}")
