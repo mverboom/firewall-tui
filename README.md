@@ -51,7 +51,8 @@ Documentation:
   dropdown shows each service's port/proto next to its name (e.g.
   `ssh (22/tcp)`) and type-to-search matches on it. `w` on a db field
   (Service, a host/network/group Source/Destination, or a NAT target)
-  shows where that db item is used across all firewalls. The form only offers
+  shows where that db item is used across all firewalls; enter on a rule
+  jumps to it, warning first if the current rule has unsaved changes. The form only offers
   options valid in the current tab's table: Chains are INPUT/OUTPUT/FORWARD
   in Rules, PREROUTING/INPUT/OUTPUT/POSTROUTING in NAT (all five in
   Mangle), and the DNAT/SNAT/MASQUERADE targets appear only in the NAT tab

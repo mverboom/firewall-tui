@@ -109,8 +109,8 @@ Working features (all in `fwtui/`):
   actions; `a` adds a db entry without leaving the editor; `tab` cycles the
   main components, up/down move between fields. `w` shows where the db item
   in the highlighted field (Service, a host/network/group Source/Destination,
-  or a NAT target) is used across all firewalls (read-only report; the
-  editor is not left).
+  or a NAT target) is used across all firewalls; enter on a rule leaves the
+  editor and jumps to it, warning first when the rule has unsaved changes.
 - Sections & rules: add, edit, rename, delete, reorder (ctrl+up/down;
   sections stay within their file, rules within their section); blank-line
   spacing normalized on section moves; selection preserved after edits.

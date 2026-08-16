@@ -299,6 +299,8 @@ class RuleEditor(ModalScreen):
         self.table = table
         self.proto = proto if proto in ("4", "6", "46") else "4"
         self.text = text
+        self._baseline_text = ""  # raw text snapshot on mount (for edits)
+        self._pending_jump = None
         self.db = db or expand.Db()
         self.services = list(self.db.services)
         self.hosts = list(self.db.hosts)
@@ -522,6 +524,9 @@ class RuleEditor(ModalScreen):
             self._apply_src_type(wid)
         self._sync_from_raw()
         self._update_conditional_rows()
+        # snapshot the normalized raw text once the editor settles (a few
+        # frames later) so later edits can be detected for the jump warning
+        self.set_timer(0.2, self._snapshot_baseline)
 
     def on_text_area_changed(self, event) -> None:
         """Raw text edited: re-parse the fields (debounced so partial typing
@@ -777,10 +782,41 @@ class RuleEditor(ModalScreen):
                       f"{len(rule_refs) + len(db_refs)} reference(s)"),
             self._on_where_used_done)
 
-    def _on_where_used_done(self, _payload) -> None:
-        """The report closed; stay in the editor (jumping is not offered
-        here to avoid discarding the in-progress edit)."""
-        return
+    def _on_where_used_done(self, payload) -> None:
+        """A rule reference was picked in the where-used report: leave the
+        editor and jump to it, warning first if the rule has unsaved edits."""
+        if not payload or payload[0] == "db":
+            return
+        host, section, line = payload
+        if self._has_unsaved_changes():
+            self._pending_jump = (host, section, line)
+            self.app.push_screen(ConfirmDiscardJump(), self._on_discard_jump)
+        else:
+            self._discard_and_jump(host, section, line)
+
+    def _on_discard_jump(self, confirmed) -> None:
+        if not confirmed or not self._pending_jump:
+            self._pending_jump = None
+            return
+        host, section, line = self._pending_jump
+        self._pending_jump = None
+        self._discard_and_jump(host, section, line)
+
+    def _discard_and_jump(self, host, section, line) -> None:
+        """Leave the editor without saving and tell the app to jump."""
+        self.dismiss({"_jump": (host, section, line)})
+
+    def _has_unsaved_changes(self) -> bool:
+        """True if the rule text was edited since the editor opened (the
+        raw text is normalized on mount, so the baseline is captured once it
+        settles; for a new rule, any typed content counts as a change)."""
+        if not self._baseline_text:
+            self._snapshot_baseline()
+        return self.query_one("#f-raw", TextArea).text != self._baseline_text
+
+    def _snapshot_baseline(self) -> None:
+        """Record the editor's normalized raw text as the no-change state."""
+        self._baseline_text = self.query_one("#f-raw", TextArea).text
 
     def _focused_db_ref(self):
         """The (section, key) db object the currently-focused field holds,
@@ -1111,6 +1147,37 @@ class ConfirmSwitch(ModalScreen):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-switch":
+            self.dismiss(True)
+        elif event.button.id == "btn-cancel":
+            self.dismiss(False)
+
+    def action_yes(self) -> None:
+        self.dismiss(True)
+
+    def action_no(self) -> None:
+        self.dismiss(False)
+
+
+class ConfirmDiscardJump(ModalScreen):
+    """Confirm leaving the rule editor (discarding unsaved rule edits) to
+    jump to a where-used reference."""
+
+    BINDINGS = [
+        Binding("escape", "no", "Cancel"),
+        Binding("y", "yes", "Discard & jump"),
+        Binding("n", "no", "Cancel"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        yield Static("Discard changes to this rule and jump?\n"
+                     "The current rule edit will be lost.",
+                     classes="modal-title")
+        with Horizontal(id="modal-buttons"):
+            yield Button("Discard & jump", variant="error", id="btn-jump")
+            yield Button("Cancel", id="btn-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-jump":
             self.dismiss(True)
         elif event.button.id == "btn-cancel":
             self.dismiss(False)
@@ -2340,6 +2407,10 @@ class FirewallApp(App):
                         result) -> None:
         if not result:
             return
+        if "_jump" in result:
+            # the editor's where-used jumped instead of adding a rule
+            self._jump_to_reference(*result["_jump"])
+            return
         self._snapshot()
         # find the section line (in the file it came from)
         key = result["table"] + result["proto"]
@@ -2398,6 +2469,10 @@ class FirewallApp(App):
 
     def _on_rule_edited_existing(self, line, section, result) -> None:
         if not result:
+            return
+        if "_jump" in result:
+            # the editor's where-used jumped instead of editing the rule
+            self._jump_to_reference(*result["_jump"])
             return
         self._snapshot()
         line.table = result["table"]
