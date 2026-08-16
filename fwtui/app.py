@@ -1157,40 +1157,60 @@ class ValidationReport(ModalScreen):
         self.dismiss(None)
 
 
-class DeleteBlockedReport(ModalScreen):
-    """Shown when a db entry is still in use by rules or other db entries,
-    so it cannot be deleted. Lists the references; no delete is performed."""
+class DbReferencesReport(ModalScreen):
+    """Shown for a db entry's references (where-used, or delete-blocked).
+    Lists the referencing rules (host + section + rule) and nested db group
+    references. Enter on a rule line dismisses with a (host, section, line)
+    payload so the app can switch to that host and highlight the rule; db
+    references cannot be jumped to."""
 
     CSS = """
-    DeleteBlockedReport #report-list { height: 20; }
+    DbReferencesReport #report-list { height: 20; }
     """
 
     BINDINGS = [Binding("escape", "close", "Close"),
                 Binding("q", "close", "Close")]
 
-    def __init__(self, section, key, rule_refs, db_refs) -> None:
+    def __init__(self, section, key, rule_refs, db_refs, title=None) -> None:
         super().__init__()
         self.section = section
         self.key = key
+        # rule_refs: list of (host, section, Line); db_refs: list of DbLine
         self.rule_refs = rule_refs
         self.db_refs = db_refs
+        self.entries = self._entries()
+        self.title = title
+
+    def _entries(self):
+        """Parallel (payload, label) list; payload is None for db refs."""
+        out = []
+        for host, sec, l in self.rule_refs:
+            out.append(((host, sec, l),
+                        f"rule  {host} [{l.table}{l.proto}] {l.value}"))
+        for l in self.db_refs:
+            out.append((None, f"db    [{l.section}] {l.key}={l.value}"))
+        return out
 
     def compose(self) -> ComposeResult:
-        n = len(self.rule_refs) + len(self.db_refs)
+        n = len(self.entries)
         yield Static(
-            f"'{self.key}' ({self.section}) is used by {n} "
-            f"reference(s) and can't be deleted.",
+            self.title or (f"'{self.key}' ({self.section}) is used by "
+                           f"{n} reference(s)."),
             classes="modal-title")
-        items = []
-        for host, l in self.rule_refs:
-            items.append(ListItem(Label(
-                f"rule  {host} [{l.table}{l.proto}] {l.value}")))
-        for l in self.db_refs:
-            items.append(ListItem(Label(
-                f"db    [{l.section}] {l.key}={l.value}")))
+        items = [ListItem(Label(label)) for _, label in self.entries]
+        if not items:
+            items = [ListItem(Label("No references."))]
         yield ListView(*items, id="report-list")
         with Horizontal(id="modal-buttons"):
             yield Button("Close", id="btn-close")
+
+    def on_list_view_selected(self, event) -> None:
+        """Enter on a reference: dismiss with its jump payload."""
+        index = event.list_view.index
+        if index is not None and index < len(self.entries):
+            self.dismiss(self.entries[index][0])
+        else:
+            self.dismiss(None)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-close":
@@ -1633,6 +1653,7 @@ class FirewallApp(App):
         Binding("a", "add", "Add"),
         Binding("e", "edit", "Edit"),
         Binding("d", "delete", "Delete"),
+        Binding("u", "where_used", "Where used"),
         Binding("n", "new_section", "New section"),
         Binding("v", "validate", "Validate"),
         Binding("p", "preview", "Preview"),
@@ -1672,6 +1693,7 @@ class FirewallApp(App):
         self.undo_stack: list = []
         self.db_mode = False
         self._pending_host: str | None = None
+        self._pending_jump: tuple | None = None
         # git state (cached: the repo status does not change mid-session)
         self._git_info_cache: tuple[bool, str] | None = None
 
@@ -2859,6 +2881,43 @@ class FirewallApp(App):
         self._rebuild_db()
         self._populate_db()
 
+    def _collect_db_refs(self, section: str, key: str):
+        """All references to a db entry (section, key): the rules that use
+        it across every host ruleset (each as (host, section, Line)) and any
+        nested db entries (groups) that list it."""
+        rule_refs: list[tuple[str, str, parser.Line]] = []
+        for host, lines in self._all_ruleset_lines():
+            current_section = "(no section)"
+            for l in lines:
+                if l.kind == "section":
+                    current_section = l.name
+                    continue
+                if l.kind == "rule" and expand.rule_references(
+                        l.value, section, key):
+                    rule_refs.append((host, current_section, l))
+        db_refs = expand.db_group_refs(self.dblines, section, key)
+        return rule_refs, db_refs
+
+    def action_where_used(self) -> None:
+        """u: show every use of the selected db entry (rules in any host +
+        nested db references), and jump to a rule on enter."""
+        if not self.db_mode:
+            self.notify("Where-used works on db entries (db tab)",
+                        severity="warning")
+            return
+        rk, info = self._selected_row()
+        if not info or info[0] != "dbentry":
+            self.notify("Select a db entry to inspect", severity="warning")
+            return
+        e = self.dblines[info[4]]
+        section, key = e.section, e.key
+        rule_refs, db_refs = self._collect_db_refs(section, key)
+        n = len(rule_refs) + len(db_refs)
+        self.push_screen(DbReferencesReport(
+            section, key, rule_refs, db_refs,
+            title=f"Where used: '{key}' ({section}) — {n} reference(s)"),
+            self._on_db_ref_jump)
+
     def _delete_db_entry(self) -> None:
         rk, info = self._selected_row()
         if not info or info[0] != "dbentry":
@@ -2868,16 +2927,14 @@ class FirewallApp(App):
         section, key = e.section, e.key
         # cross-check that nothing still references this entry before deleting:
         # (1) rules in any host ruleset, (2) other db entries (groups).
-        rule_refs: list[tuple[str, parser.Line]] = []
-        for host, lines in self._all_ruleset_lines():
-            for l in lines:
-                if l.kind == "rule" and expand.rule_references(
-                        l.value, section, key):
-                    rule_refs.append((host, l))
-        db_refs = expand.db_group_refs(self.dblines, section, key)
+        rule_refs, db_refs = self._collect_db_refs(section, key)
         if rule_refs or db_refs:
-            self.push_screen(DeleteBlockedReport(
-                section, key, rule_refs, db_refs))
+            self.push_screen(DbReferencesReport(
+                section, key, rule_refs, db_refs,
+                title=f"'{key}' ({section}) is used by "
+                      f"{len(rule_refs) + len(db_refs)} reference(s) "
+                      f"and can't be deleted."),
+                self._on_db_ref_jump)
             return
         self._snapshot()
         if e in self.dblines:
@@ -2885,6 +2942,62 @@ class FirewallApp(App):
         self.dirty = True
         self._rebuild_db()
         self._populate_db()
+
+    def _on_db_ref_jump(self, payload) -> None:
+        """After a DbReferencesReport closes: jump to the chosen rule."""
+        self.screen.refresh()  # defensive: modal pop can leave ghost content
+        if not payload:
+            return
+        if payload[0] == "db":
+            self.notify("That is a db reference; select a rule line to jump "
+                        "to its host", severity="warning")
+            return
+        host, section, line = payload
+        self._jump_to_reference(host, section, line)
+
+    def _jump_to_reference(self, host: str, section: str, line) -> None:
+        """Switch to the host that uses a db entry and highlight the rule.
+        Confirms before discarding unsaved edits, like a manual host switch."""
+        if host not in self.hosts:
+            self.notify(f"Host '{host}' not found", severity="warning")
+            return
+        if host != self.current_host and self.dirty:
+            self._pending_host = host
+            self._pending_jump = (section, line)
+            self.push_screen(ConfirmSwitch(), self._on_jump_confirm)
+            return
+        self._perform_jump(host, section, line)
+
+    def _on_jump_confirm(self, result) -> None:
+        if result and self._pending_host and self._pending_jump:
+            host = self._pending_host
+            section, line = self._pending_jump
+            self._pending_host = None
+            self._pending_jump = None
+            self._perform_jump(host, section, line)
+        else:
+            self._pending_host = None
+            self._pending_jump = None
+
+    def _perform_jump(self, host: str, section: str, line) -> None:
+        """Ensure the host's ruleset is current, then highlight the rule.
+        The reference line came from a separate scan, so it is re-found in
+        the in-memory ruleset by (section, value, table, proto) before the
+        view selects it (RulesView matches rule rows by object identity)."""
+        self._set_db_mode(False)
+        if host != self.current_host:
+            self._load_ruleset(host)
+        current = "(no section)"
+        for l in self.lines:
+            if l.kind == "section":
+                current = l.name
+                continue
+            if (l.kind == "rule" and current == section
+                    and l.value == line.value
+                    and l.table == line.table and l.proto == line.proto):
+                line = l
+                break
+        self._jump_to_rule(line, section)
 
     def _all_ruleset_lines(self) -> list[tuple[str, list]]:
         """Return (host, lines) for every host ruleset, includes spliced."""
@@ -3175,7 +3288,8 @@ class FirewallApp(App):
             empty_hint = "O=hide empty"
         git_hint = "g=git " if self._git_available() else ""
         sb.update(
-            f"a=add e=edit d=delete n=new section space=collapse o=toggle all "
+            f"a=add e=edit d=delete u=where used n=new section "
+            f"space=collapse o=toggle all "
             f"{empty_hint} enter=edit v=validate p=preview D=deploy {git_hint}"
             f"/=filter ctrl+z=undo ctrl+s=save q=quit   esc=menu{filt}")
 

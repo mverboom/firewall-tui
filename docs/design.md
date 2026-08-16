@@ -98,7 +98,11 @@ Working features (all in `fwtui/`):
   (`expand.validate_db_value`): hosts must be IPs, networks valid
   network/mask, services port/proto or icmp[/type], group members must
   exist in the db; errors are shown inline and the modal stays open.
-  `@command` values are not validated.
+  `@command` values are not validated. `u` (where used) and the delete
+  in-use guard both open a `DbReferencesReport` listing every reference
+  (rules across all hosts, plus nested db groups); enter on a rule line
+  switches to that host and highlights the rule, confirming first when
+  unsaved edits would be discarded.
 - Rule editor: builder form + raw text, two-way sync (debounced so partial
   typing doesn't pollute the dropdowns); DNAT/SNAT rows only shown for NAT
   actions; `a` adds a db entry without leaving the editor; `tab` cycles the
