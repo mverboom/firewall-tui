@@ -49,7 +49,9 @@ Documentation:
   body as `func(x) src` / `func(x) dst` rather than behind a `-s`/`-d` flag
   (the manifest rejects the latter). The Service
   dropdown shows each service's port/proto next to its name (e.g.
-  `ssh (22/tcp)`) and type-to-search matches on it. The form only offers
+  `ssh (22/tcp)`) and type-to-search matches on it. `w` on a db field
+  (Service, a host/network/group Source/Destination, or a NAT target)
+  shows where that db item is used across all firewalls. The form only offers
   options valid in the current tab's table: Chains are INPUT/OUTPUT/FORWARD
   in Rules, PREROUTING/INPUT/OUTPUT/POSTROUTING in NAT (all five in
   Mangle), and the DNAT/SNAT/MASQUERADE targets appear only in the NAT tab
@@ -200,6 +202,7 @@ Rule editor:
 | *(in an open dropdown)* | type to search/filter the options (all dropdowns, like the host selector) |
 | `s` / `ctrl+s` | save (typing `s` in a text field still types) |
 | `a` | add a db entry without leaving the editor (`section:key=value`) |
+| `w` | where used for the db item in the highlighted field (Service, a host/network/group Source/Destination, or a NAT target) |
 | `esc` | cancel |
 
 ### Typical workflow

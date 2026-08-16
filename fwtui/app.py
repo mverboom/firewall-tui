@@ -287,6 +287,7 @@ class RuleEditor(ModalScreen):
         Binding("ctrl+s", "save", "Save"),
         Binding("s", "save", "Save", show=False),
         Binding("a", "add_db_entry", "Add db entry", show=False),
+        Binding("w", "where_used", "Where used", show=False),
         Binding("up", "prev_field", "Prev field", show=False),
         Binding("down", "next_field", "Next field", show=False),
     ]
@@ -756,6 +757,82 @@ class RuleEditor(ModalScreen):
             cur = val_sel.value
             val_sel.set_options(self._src_type_options(kind))
             self._set_select_value(val_sel, cur)
+
+    # -- where-used (w) on the highlighted db item ------------------------
+    def action_where_used(self) -> None:
+        """w: show where the db item in the highlighted field is used. Only
+        does something when the focused field holds a db reference (service,
+        source/destination host/network/group, NAT to-host/to-svc)."""
+        ref = self._focused_db_ref()
+        if not ref:
+            self.notify("No db item selected in the highlighted field",
+                        severity="warning")
+            return
+        section, key = ref
+        rule_refs, db_refs = self.app._collect_db_refs(section, key)
+        self.app.push_screen(
+            DbReferencesReport(
+                section, key, rule_refs, db_refs,
+                title=f"Where used: '{key}' ({section}) — "
+                      f"{len(rule_refs) + len(db_refs)} reference(s)"),
+            self._on_where_used_done)
+
+    def _on_where_used_done(self, _payload) -> None:
+        """The report closed; stay in the editor (jumping is not offered
+        here to avoid discarding the in-progress edit)."""
+        return
+
+    def _focused_db_ref(self):
+        """The (section, key) db object the currently-focused field holds,
+        or None if it is not a db reference."""
+        f = self.focused
+        if f is None or f.id is None:
+            return None
+        fid = f.id
+        if fid in ("f-src-type", "f-src-val", "f-src-custom"):
+            return self._src_field_db_ref("f-src")
+        if fid in ("f-dst-type", "f-dst-val", "f-dst-custom"):
+            return self._src_field_db_ref("f-dst")
+        if fid == "f-svc":
+            return self._service_db_ref()
+        if fid == "f-to-host":
+            val = self.query_one("#f-to-host", Select).value or ""
+            m = re.match(r"host\(([^)]+)\)", val)
+            return ("hosts", m.group(1)) if m else None
+        if fid == "f-to-svc":
+            val = self.query_one("#f-to-svc", Select).value or ""
+            m = re.match(r"service\(([^)]+)\)", val)
+            return ("services", m.group(1)) if m else None
+        return None
+
+    def _src_field_db_ref(self, wid: str):
+        """The db object the Source/Destination field holds (by its type)."""
+        kind = self.query_one(f"#{wid}-type", Select).value
+        section = {"host": "hosts", "hostgroup": "hostgroups",
+                   "network": "networks",
+                   "networkgroup": "networkgroups"}.get(kind)
+        if not section:
+            return None
+        val = self.query_one(f"#{wid}-val", Select).value or ""
+        m = re.match(rf"{re.escape(kind)}\(([^)]+)\)", val)
+        return (section, m.group(1)) if m else None
+
+    def _service_db_ref(self):
+        """The db object the Service field holds (a service, a dservice, or
+        a dservices group; a comma list of services is not one object)."""
+        svc = self.query_one("#f-svc", Select).value or ""
+        if not svc or svc == CUSTOM:
+            return None
+        m = re.match(r"dservices\(([^)]+)\)", svc)
+        if m:
+            group = m.group(1)
+            if group in self.db.servicegroups:
+                return ("servicegroups", group)
+            return None
+        m = re.match(r"dservice\(([^)]+)\)", svc)
+        if m:
+            return ("services", m.group(1))
+        return ("services", svc)
 
     # -- form navigation ----------------------------------------------------
     FIELD_IDS = ("f-proto", "f-chain", "f-iface", "f-src-type",

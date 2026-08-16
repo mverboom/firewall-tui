@@ -107,7 +107,10 @@ Working features (all in `fwtui/`):
 - Rule editor: builder form + raw text, two-way sync (debounced so partial
   typing doesn't pollute the dropdowns); DNAT/SNAT rows only shown for NAT
   actions; `a` adds a db entry without leaving the editor; `tab` cycles the
-  main components, up/down move between fields.
+  main components, up/down move between fields. `w` shows where the db item
+  in the highlighted field (Service, a host/network/group Source/Destination,
+  or a NAT target) is used across all firewalls (read-only report; the
+  editor is not left).
 - Sections & rules: add, edit, rename, delete, reorder (ctrl+up/down;
   sections stay within their file, rules within their section); blank-line
   spacing normalized on section moves; selection preserved after edits.
