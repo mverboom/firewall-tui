@@ -2046,11 +2046,9 @@ class FirewallApp(App):
                 self._focus_content()
                 event.stop()
             elif focused is self.query_one("#db-button", Button):
-                # down from the db button: back to the db view (or the tabs)
-                if self.db_mode:
-                    self.db_view.focus()
-                else:
-                    self._focus_tabs()
+                # down from the db button: enter the db view (mirror of
+                # up returning from the db view to the db button)
+                self._set_db_mode(True)
                 event.stop()
         elif event.key == "up":
             if isinstance(focused, ContentTabs):
