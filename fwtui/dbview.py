@@ -12,11 +12,11 @@ Row model (list of tuples):
 from __future__ import annotations
 
 from rich.text import Text
-from textual import events
 from textual.binding import Binding
 from textual.message import Message
 from textual.strip import Strip
-from textual.widget import Widget
+
+from .scrollview import NAV_BINDINGS, ScrollView
 
 COLUMNS = ("key", "value")
 COL_WIDTHS = (24, 60)
@@ -25,29 +25,12 @@ SECTION_FG = "#a9b1d6"
 SECTION_BG = "#2a2f45"
 
 
-class DbView(Widget, can_focus=True):
+class DbView(ScrollView):
     """Collapsible grouped view of the db file."""
 
-    BINDINGS = [
-        Binding("up", "move(-1)", "Up", show=False),
-        Binding("down", "move(1)", "Down", show=False),
-        Binding("pageup", "move(-10)", "Page up", show=False),
-        Binding("pagedown", "move(10)", "Page down", show=False),
-        Binding("home", "move(-100000)", "Top", show=False),
-        Binding("end", "move(100000)", "Bottom", show=False),
-        # vi-style navigation (arrow keys still work)
-        Binding("j", "move(1)", "Down", show=False),
-        Binding("k", "move(-1)", "Up", show=False),
-        Binding("G", "move(100000)", "Bottom", show=False),
-        Binding("ctrl+d", "move_half_page(1)", "Half page down", show=False),
-        Binding("ctrl+u", "move_half_page(-1)", "Half page up", show=False),
-        Binding("ctrl+f", "move_page(1)", "Page down", show=False),
-        Binding("ctrl+b", "move_page(-1)", "Page up", show=False),
-        Binding("space", "toggle_collapse", "Collapse/expand", show=False),
+    BINDINGS = NAV_BINDINGS + [
         Binding("c", "collapse_all", "Collapse all", show=False),
         Binding("o", "expand_all", "Expand all", show=False),
-        Binding("enter", "activate", "Edit", show=False),
-        Binding("/", "search", "Filter", show=False),
     ]
 
     class SelectionChanged(Message):
@@ -68,13 +51,9 @@ class DbView(Widget, can_focus=True):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.all_rows: list[tuple] = []
-        self.rows: list[tuple] = []
         self.collapsed: set[str] = set()
         self._initialized = False
         self.filter_text = ""
-        self.selected = 0
-        self.scroll = 0
 
     # -- data --------------------------------------------------------------
     def set_rows(self, rows: list[tuple]) -> None:
@@ -160,27 +139,7 @@ class DbView(Widget, can_focus=True):
         self._rebuild_visible()
         self.refresh()
 
-    # -- navigation --------------------------------------------------------
-    def action_move(self, delta: int) -> None:
-        if delta < 0 and self.selected == 0 and self.scroll == 0:
-            # at the very top (including an empty view): back to the menu
-            self.post_message(self.NavigateUp())
-            return
-        if not self.rows:
-            return
-        self.selected = max(0, min(len(self.rows) - 1, self.selected + delta))
-        self._ensure_visible()
-        self.refresh()
-        self.post_message(self.SelectionChanged(self.selected))
-
-    def action_move_page(self, delta: int) -> None:
-        """ctrl+f/ctrl+b: move a full viewport."""
-        self.action_move(delta * max(1, self.size.height))
-
-    def action_move_half_page(self, delta: int) -> None:
-        """ctrl+d/ctrl+u: move half a viewport."""
-        self.action_move(delta * max(1, self.size.height // 2))
-
+    # -- collapse ----------------------------------------------------------
     def action_toggle_collapse(self) -> None:
         if not self.rows:
             return
@@ -218,30 +177,6 @@ class DbView(Widget, can_focus=True):
         else:
             self.post_message(self.Activate(self.selected))
 
-    def _ensure_visible(self) -> None:
-        height = max(1, self.size.height)
-        if self.selected < self.scroll:
-            self.scroll = self.selected
-        elif self.selected >= self.scroll + height:
-            self.scroll = self.selected - height + 1
-
-    def on_click(self, event: events.Click) -> None:
-        if self.rows:
-            self.selected = min(len(self.rows) - 1, event.y + self.scroll)
-            self._ensure_visible()
-            self.refresh()
-            self.post_message(self.SelectionChanged(self.selected))
-
-    def on_mouse_scroll_down(self, event) -> None:
-        if self.rows:
-            self.scroll = min(len(self.rows) - 1, self.scroll + 3)
-            self.refresh()
-
-    def on_mouse_scroll_up(self, event) -> None:
-        if self.rows:
-            self.scroll = max(0, self.scroll - 3)
-            self.refresh()
-
     # -- rendering ---------------------------------------------------------
     def render_line(self, y: int) -> Strip:
         width = self.size.width
@@ -251,20 +186,9 @@ class DbView(Widget, can_focus=True):
         row = self.rows[vy]
         selected = (vy == self.selected)
         if row[0] == "dbsection":
-            return self._render_section(row[1], width, selected)
+            return self._render_section(row[1], width, selected,
+                                        SECTION_FG, SECTION_BG, row[1])
         return self._render_entry(row[1], row[2], width, selected)
-
-    def _render_section(self, name: str, width: int, selected: bool) -> Strip:
-        style = f"{SECTION_FG} on {SECTION_BG}"
-        marker = "▾" if name not in self.collapsed else "▸"
-        text = Text(f" {marker} {name}", style=style)
-        if text.cell_len > width:
-            text = Text(text.plain[: max(0, width - 3)] + "...", style=style)
-        text.pad_right(max(0, width - text.cell_len))
-        if selected:
-            text.stylize("reverse")
-        segments = [s for s in self.app.console.render(text) if s.text != "\n"]
-        return Strip(segments, width)
 
     def _render_entry(self, key: str, value: str, width: int,
                       selected: bool) -> Strip:

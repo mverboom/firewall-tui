@@ -12,7 +12,7 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 
-from .parser import global_lines, rules_in_section
+from .parser import global_dict, rules_in_section
 
 # ---------------------------------------------------------------------------
 # db access
@@ -378,6 +378,84 @@ def _validate_group_list(value: str, db: Db | None, table: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# reference detection (used before deleting a db entry)
+# ---------------------------------------------------------------------------
+
+# rule function -> db section it references
+_FUNC_TO_SECTION = {
+    "service": "services",
+    "dservice": "services",
+    "host": "hosts",
+    "hosts": "hosts",
+    "network": "networks",
+    "hostgroup": "hostgroups",
+    "networkgroup": "networkgroups",
+    "dservices": "servicegroups",
+}
+
+# which db group section lists members of a given leaf section
+_LEAF_GROUP = {
+    "services": "servicegroups",
+    "hosts": "hostgroups",
+    "networks": "networkgroups",
+}
+
+
+def _rule_funcs(value: str) -> list[tuple[str, str]]:
+    """Yield (funcname, args) for every func(args) token in a rule value,
+    using the same tokenizer as expand_rule so reference detection matches
+    what the manifest actually expands."""
+    out: list[tuple[str, str]] = []
+    guard = 0
+    while value and guard < 100:
+        guard += 1
+        m = re.search(r"(^|[^(]*[ .:-;])([^( .:-;]+\([^)]+\))", value)
+        if not m:
+            break
+        tok = m.group(2)
+        value = value[m.end(2):]
+        out.append((tok[: tok.index("(")], tok[tok.index("(") + 1: -1]))
+    return out
+
+
+def _func_refers(funcname: str, args: str, section: str, key: str) -> bool:
+    """Does one function call reference the db entry (section, key)?"""
+    if funcname == "dservices":
+        # a service group name, or a comma list of individual services
+        if section == "servicegroups":
+            return args == key
+        if section == "services":
+            return key in {t.strip() for t in args.split(",")}
+        return False
+    if funcname == "hosts":
+        if section != "hosts":
+            return False
+        return key in {t.strip() for t in args.split(",")}
+    return _FUNC_TO_SECTION.get(funcname) == section and args == key
+
+
+def rule_references(value: str, section: str, key: str) -> bool:
+    """True if the rule text references the db entry (section, key)."""
+    return any(_func_refers(f, a, section, key) for f, a in _rule_funcs(value))
+
+
+def db_group_refs(lines, section: str, key: str):
+    """Db entries (groups) that reference a leaf entry (section, key).
+    Groups list members of leaf sections only (no group-in-group nesting).
+    @command group values are unknown at edit time and are not flagged."""
+    group_sec = _LEAF_GROUP.get(section)
+    if group_sec is None:
+        return []
+    refs = []
+    for l in lines:
+        if l.kind == "entry" and l.section == group_sec \
+                and not l.value.startswith("@"):
+            if key in {t.strip() for t in l.value.split(",")}:
+                refs.append(l)
+    return refs
+
+
+# ---------------------------------------------------------------------------
 # whole-file validation
 # ---------------------------------------------------------------------------
 
@@ -414,7 +492,7 @@ def validate_rules(lines, db: Db) -> list[RuleIssue]:
 def validate_globals(lines) -> list[str]:
     """Check global section values (policy, proto, etc.)."""
     errs: list[str] = []
-    globals_ = {l.key: l.value for l in lines if l.kind == "global"}
+    globals_ = global_dict(lines)
     policy = globals_.get("policy", "accept")
     for chain in ("", "_input", "_output", "_forward"):
         p = globals_.get(f"policy{chain}", policy)
@@ -448,7 +526,7 @@ def validate_duplicate_sections(lines) -> list[str]:
 def validate_proto_coverage(lines) -> list[str]:
     """Warn when a configured proto has no rules at all (the manifest emits
     this warning; the chain policy then applies to all that proto's traffic)."""
-    globals_ = {l.key: l.value for l in lines if l.kind == "global"}
+    globals_ = global_dict(lines)
     proto = globals_.get("proto", "4")
     protos = [p for p in (4, 6) if str(p) in proto.split(",")]
     counts = {4: 0, 6: 0}
@@ -476,7 +554,7 @@ def generate_preview(lines, db) -> dict[int, list[str]]:
     manifest's generation order (established, icmp drop, section rules
     grouped filter/nat/mangle, icmp allow, policy, loopback, log).
     Returns {4: [lines], 6: [lines]}."""
-    globals_ = {l.key: l.value for l in global_lines(lines)}
+    globals_ = global_dict(lines)
     proto = globals_.get("proto", "4")
     protos = [p for p in (4, 6) if str(p) in proto.split(",")]
     out: dict[int, list[str]] = {p: [] for p in protos}

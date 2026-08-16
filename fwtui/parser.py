@@ -12,7 +12,7 @@ their exact raw text (comments, blank lines, commented-out rules, spacing).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # Keys allowed in the [global] section of a rules file
 GLOBAL_KEYS = (
@@ -210,6 +210,11 @@ def global_lines(lines: list[Line]) -> list[Line]:
         if l.kind == "global":
             out.append(l)
     return out
+
+
+def global_dict(lines: list[Line]) -> dict[str, str]:
+    """Return the [global] section as a {key: value} dict."""
+    return {l.key: l.value for l in global_lines(lines)}
 
 
 def db_entries(lines: list[DbLine], section: str) -> list[DbLine]:

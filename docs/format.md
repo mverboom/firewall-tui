@@ -76,6 +76,7 @@ by the TUI's `expand.py` for validation):
 | `host(name)` | the host's IP for this proto | db `[hosts]`, then DNS fallback |
 | `hosts(a,b)` | comma-separated IPs | |
 | `hostgroup(name)` | `-m set --match-set <proto>-ip-<name>` | must be followed by `src`/`dst`; do **not** put `-s`/`-d` before it |
+| `dns(name)` | `-m set --match-set <proto>-dns-<name>` | DNS-resolved host; resolved periodically on the firewall host by `firewall-dns`; must be followed by `src`/`dst`, **not** `-s`/`-d` |
 | `network(name)` | `network/mask` | db `[networks]`, per proto |
 | `networkgroup(name)` | `-m set --match-set <proto>-net-<name>` | same `src`/`dst` rule as hostgroup |
 | `service(name)` | the port number | proto taken from the db |
@@ -99,6 +100,8 @@ by the TUI's `expand.py` for validation):
   `mangle=-A PREROUTING -j MARK --set-mark N`
 - ipset groups:
   `filter=-A INPUT hostgroup(sipclients) src -d host(...) dservice(sip) -j ACCEPT`
+- DNS-resolved host (periodically re-resolved by the firewall host):
+  `filter=-A INPUT dns(secure.verboom.net) src dservice(https) -j ACCEPT`
 
 ## Generation order (what the manifest emits)
 

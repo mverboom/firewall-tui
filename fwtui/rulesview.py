@@ -27,11 +27,11 @@ existing (for this table empty) section.
 from __future__ import annotations
 
 from rich.text import Text
-from textual import events
 from textual.binding import Binding
 from textual.message import Message
 from textual.strip import Strip
-from textual.widget import Widget
+
+from .scrollview import NAV_BINDINGS, ScrollView
 
 COLUMNS = ("chain", "from", "sport", "to", "proto", "port",
            "action", "target")
@@ -55,31 +55,14 @@ def header_text(widths: list[int] | None = None) -> str:
     return " ".join(c.ljust(w) for c, w in zip(COLUMNS, widths))
 
 
-class RulesView(Widget, can_focus=True):
+class RulesView(ScrollView):
     """Full-width rules view with spanning section bars."""
 
-    BINDINGS = [
-        Binding("up", "move(-1)", "Up", show=False),
-        Binding("down", "move(1)", "Down", show=False),
-        Binding("pageup", "move(-10)", "Page up", show=False),
-        Binding("pagedown", "move(10)", "Page down", show=False),
-        Binding("home", "move(-100000)", "Top", show=False),
-        Binding("end", "move(100000)", "Bottom", show=False),
-        # vi-style navigation (arrow keys still work)
-        Binding("j", "move(1)", "Down", show=False),
-        Binding("k", "move(-1)", "Up", show=False),
-        Binding("G", "move(100000)", "Bottom", show=False),
-        Binding("ctrl+d", "move_half_page(1)", "Half page down", show=False),
-        Binding("ctrl+u", "move_half_page(-1)", "Half page up", show=False),
-        Binding("ctrl+f", "move_page(1)", "Page down", show=False),
-        Binding("ctrl+b", "move_page(-1)", "Page up", show=False),
-        Binding("space", "toggle_collapse", "Collapse/expand", show=False),
+    BINDINGS = NAV_BINDINGS + [
         Binding("o", "toggle_all", "Toggle all", show=False),
         Binding("O", "toggle_empty", "Toggle empty", show=False),
-        Binding("enter", "activate", "Edit", show=False),
         Binding("ctrl+up", "move_up", "Move up", show=False),
         Binding("ctrl+down", "move_down", "Move down", show=False),
-        Binding("/", "search", "Filter", show=False),
     ]
 
     class SelectionChanged(Message):
@@ -119,14 +102,10 @@ class RulesView(Widget, can_focus=True):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self.all_rows: list[tuple] = []   # full row list from set_rows
-        self.rows: list[tuple] = []       # visible rows (collapsed sections hidden)
         self.collapsed: set[str] = set()  # section names that are collapsed
         self.hide_empty = True  # hide headers with no rules in this view
         self._initialized = False
         self.filter_text = ""
-        self.selected = 0
-        self.scroll = 0  # index of the first visible row
         self.col_widths = list(COL_WIDTHS)  # dynamic, content-based
 
     # -- data --------------------------------------------------------------
@@ -154,6 +133,19 @@ class RulesView(Widget, can_focus=True):
         self.refresh()
         self.post_message(self.SelectionChanged(0))
 
+    def _section_include_keys(self):
+        """Yield (name, source, key, include_keys) for each section row,
+        where include_keys are the include-bar keys enclosing it."""
+        stack: list[tuple[str, str]] = []  # (included file path, key)
+        for row in self.all_rows:
+            kind = row[0]
+            if kind == "include":
+                stack.append((row[2] or "", self._key(row)))
+            elif kind == "section":
+                while stack and stack[-1][0] != (row[2] or ""):
+                    stack.pop()
+                yield row[1], row[2], self._key(row), [k for _, k in stack]
+
     def _contentful_keys(self) -> set[str]:
         """Keys of header rows that have at least one rule in this view.
 
@@ -163,35 +155,21 @@ class RulesView(Widget, can_focus=True):
         sections = {(row[2], row[1].source) for row in self.all_rows
                     if row[0] == "rule"}
         contentful: set[str] = set()
-        stack: list[tuple[str, str]] = []  # (included file path, key)
         for row in self.all_rows:
-            kind = row[0]
-            if kind == "include":
-                stack.append((row[2] or "", self._key(row)))
-            elif kind == "section":
-                while stack and stack[-1][0] != (row[2] or ""):
-                    stack.pop()
-                if (row[1], row[2]) in sections:
-                    contentful.add(self._key(row))
-                    for _, key in stack:
-                        contentful.add(key)
-            elif kind == "implicit-section":
+            if row[0] == "implicit-section":
                 contentful.add(self._key(row))
+        for name, source, key, inc_keys in self._section_include_keys():
+            if (name, source) in sections:
+                contentful.add(key)
+                contentful.update(inc_keys)
         return contentful
 
     def _matching_include_keys(self, matching: set) -> set[str]:
         """Include bars that contain a section with matching rules (filter)."""
         result: set[str] = set()
-        stack: list[tuple[str, str]] = []  # (included file path, key)
-        for row in self.all_rows:
-            if row[0] == "include":
-                stack.append((row[2] or "", self._key(row)))
-            elif row[0] == "section":
-                while stack and stack[-1][0] != (row[2] or ""):
-                    stack.pop()
-                if (row[1], row[2]) in matching:
-                    for _, key in stack:
-                        result.add(key)
+        for name, source, key, inc_keys in self._section_include_keys():
+            if (name, source) in matching:
+                result.update(inc_keys)
         return result
 
     def _rebuild_visible(self) -> None:
@@ -418,51 +396,16 @@ class RulesView(Widget, can_focus=True):
                 return True
         return False
 
-    # -- navigation --------------------------------------------------------
-    def action_move(self, delta: int) -> None:
-        if delta < 0 and self.selected == 0 and self.scroll == 0:
-            # at the very top (including an empty view): back to the menu
-            self.post_message(self.NavigateUp())
-            return
-        if not self.rows:
-            return
-        self.selected = max(0, min(len(self.rows) - 1, self.selected + delta))
-        self._ensure_visible()
-        self.refresh()
-        self.post_message(self.SelectionChanged(self.selected))
-
-    def action_move_page(self, delta: int) -> None:
-        """ctrl+f/ctrl+b: move a full viewport."""
-        self.action_move(delta * max(1, self.size.height))
-
-    def action_move_half_page(self, delta: int) -> None:
-        """ctrl+d/ctrl+u: move half a viewport."""
-        self.action_move(delta * max(1, self.size.height // 2))
-
-    def _ensure_visible(self) -> None:
-        """Keep the selected row within the visible area."""
-        height = max(1, self.size.height)
-        if self.selected < self.scroll:
-            self.scroll = self.selected
-        elif self.selected >= self.scroll + height:
-            self.scroll = self.selected - height + 1
-
-    def on_click(self, event: events.Click) -> None:
-        if self.rows:
-            self.selected = min(len(self.rows) - 1, event.y + self.scroll)
-            self._ensure_visible()
-            self.refresh()
-            self.post_message(self.SelectionChanged(self.selected))
-
-    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
-        if self.rows:
-            self.scroll = min(len(self.rows) - 1, self.scroll + 3)
-            self.refresh()
-
-    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
-        if self.rows:
-            self.scroll = max(0, self.scroll - 3)
-            self.refresh()
+    def select_include(self, name: str) -> bool:
+        """Select the row for an include bar after a repopulation."""
+        for i, row in enumerate(self.rows):
+            if row[0] == "include" and row[1] == name:
+                self.selected = i
+                self._ensure_visible()
+                self.refresh()
+                self.post_message(self.SelectionChanged(i))
+                return True
+        return False
 
     # -- rendering ---------------------------------------------------------
     def render_line(self, y: int) -> Strip:
@@ -477,37 +420,16 @@ class RulesView(Widget, can_focus=True):
             label = "include: " + row[1]
             if not row[2]:
                 label += " (missing)"
-            return self._render_section(label, width, selected, False,
-                                        include=True, key=self._key(row))
+            return self._render_section(label, width, selected,
+                                        INCLUDE_FG, INCLUDE_BG, self._key(row))
         if kind in ("section", "implicit-section"):
-            return self._render_section(row[1], width, selected,
-                                        kind == "implicit-section",
-                                        key=row[1])
+            implicit = kind == "implicit-section"
+            fg = IMPLICIT_FG if implicit else SECTION_FG
+            bg = IMPLICIT_BG if implicit else SECTION_BG
+            return self._render_section(row[1], width, selected, fg, bg,
+                                        row[1])
         # rule / implicit rows carry their column dict as the last element
         return self._render_rule(row[-1], width, selected, kind == "implicit")
-
-    def _render_section(self, name: str, width: int, selected: bool,
-                        implicit: bool, include: bool = False,
-                        key: str = "") -> Strip:
-        if include:
-            fg = INCLUDE_FG
-            bg = INCLUDE_BG
-        elif implicit:
-            fg = IMPLICIT_FG
-            bg = IMPLICIT_BG
-        else:
-            fg = SECTION_FG
-            bg = SECTION_BG
-        style = f"{fg} on {bg}"
-        marker = "▾" if key not in self.collapsed else "▸"
-        text = Text(f" {marker} {name}", style=style)
-        if text.cell_len > width:
-            text = Text(text.plain[: max(0, width - 3)] + "...", style=style)
-        text.pad_right(max(0, width - text.cell_len))
-        if selected:
-            text.stylize("reverse")
-        segments = [s for s in self.app.console.render(text) if s.text != "\n"]
-        return Strip(segments, width)
 
     def _render_rule(self, cols: dict, width: int, selected: bool,
                      implicit: bool) -> Strip:

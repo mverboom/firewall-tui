@@ -38,8 +38,11 @@ Documentation:
   `-d`, `dservice`, action, DNAT/SNAT target, extra options) with a live
   raw-text preview; the raw text is authoritative and editable, and the two
   sync both ways. Source and Destination are two-step fields: pick a type
-  (any / host / hostgroup / network / networkgroup / custom) first, then the
-  value dropdown for that type or a raw-value input for custom. The Service
+  (any / host / hostgroup / dns / network / networkgroup / custom) first, then the
+  value dropdown for that type or a raw-value input for custom/dns. The ipset
+  set-match types (hostgroup / networkgroup / dns) are emitted in the rule
+  body as `func(x) src` / `func(x) dst` rather than behind a `-s`/`-d` flag
+  (the manifest rejects the latter). The Service
   dropdown shows each service's port/proto next to its name (e.g.
   `ssh (22/tcp)`) and type-to-search matches on it. The form only offers
   options valid in the current tab's table: Chains are INPUT/OUTPUT/FORWARD
@@ -50,7 +53,11 @@ Documentation:
   be reordered within their section
 - **[#include] support**: include files are spliced inline, shown as amber
   bars, nested includes work, and edits are written back to the file they
-  came from (missing includes are marked)
+  came from (missing includes are marked). Include bars are full citizens:
+  `e` renames the `[#name]` reference, `d` removes it from this ruleset,
+  ctrl+up/down reorders them, and `a` adds a new section into the included
+  file. Deleting/renaming only changes the host's reference (the shared
+  include file is left untouched).
 - **Validation** (`v`): expands every rule with the manifest's function
   semantics (db lookups + DNS fallback), checks globals, duplicate sections
   and proto coverage; errors/warnings are shown per rule

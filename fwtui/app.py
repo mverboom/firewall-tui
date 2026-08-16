@@ -24,11 +24,17 @@ Keys:
 
 from __future__ import annotations
 
+import asyncio
+import copy
 import os
+import re
+import shlex
+import shutil
+import subprocess
 import sys
+import tempfile
 
 from rich.markup import escape
-from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -117,7 +123,6 @@ class HostSelect(NavSelect):
         pass
 
     def __init__(self, *args, **kwargs) -> None:
-        kwargs["type_to_search"] = True
         super().__init__(*args, **kwargs)
 
     def on_focus(self, event) -> None:
@@ -213,10 +218,18 @@ SRC_TYPES = [
     ("(any)", "any"),
     ("host", "host"),
     ("hostgroup", "hostgroup"),
+    ("dns", "dns"),
     ("network", "network"),
     ("networkgroup", "networkgroup"),
     ("custom", "custom"),
 ]
+
+# Source/Destination kinds that expand to an ipset match. These must NOT be
+# prefixed with -s/-d; instead the set-match direction (src/dst) is appended:
+#   hostgroup(lan) src / dns(example.org) dst / networkgroup(x) src
+SET_MATCH_KINDS = ("hostgroup", "networkgroup", "dns")
+SET_MATCH_RE = re.compile(
+    r"(?:hostgroup|networkgroup|dns)\([^)]*\)\s+(?:src|dst)$")
 
 PROTOS = [("both (46)", "46"), ("IPv4", "4"), ("IPv6", "6")]
 
@@ -230,10 +243,15 @@ def build_rule(chain: str, iface: str, src: str, dst: str, svc: str,
     parts = [f"-A {chain}"]
     if iface:
         parts.append(f"-i {iface}")
-    if src:
-        parts.append(f"-s {src}")
-    if dst:
-        parts.append(f"-d {dst}")
+    for val, flag in ((src, "-s"), (dst, "-d")):
+        if not val:
+            continue
+        if SET_MATCH_RE.match(val):
+            # ipset match already carries its src/dst direction: put it in
+            # the body without a -s/-d prefix (the manifest rejects that)
+            parts.append(val)
+        else:
+            parts.append(f"{flag} {val}")
     if svc:
         if svc.startswith("dservices("):
             parts.append(svc)  # multiport form, keep as-is
@@ -360,8 +378,11 @@ class RuleEditor(ModalScreen):
             val_sel.value = cur
         else:
             val_sel.value = ""
-        val_sel.display = kind not in ("any", "custom")
-        custom_in.display = kind == "custom"
+        val_sel.display = kind not in ("any", "custom", "dns")
+        custom_in.display = kind in ("custom", "dns")
+        custom_in.placeholder = ("domain name (resolved on the firewall host)"
+                                 if kind == "dns" else
+                                 "raw value (IP, host(x), ...)")
 
     def _on_src_type_changed(self, wid: str) -> None:
         """Type dropdown changed: repopulate the value dropdown, toggle the
@@ -373,23 +394,34 @@ class RuleEditor(ModalScreen):
         """Set the type + value widgets from a raw -s/-d value (e.g.
         'host(proxy)' -> type host, value proxy; '192.168.1.77' -> custom)."""
         wid = wid.lstrip("#")
-        import re
-        m = re.match(r"(host|hostgroup|network|networkgroup)\(([^)]+)\)",
+        m = re.match(r"(host|hostgroup|network|networkgroup|dns)\(([^)]+)\)",
                      raw_value)
         kind, name = (m.group(1), m.group(2)) if m else ("custom", raw_value)
         self.query_one(f"#{wid}-type", Select).value = kind
         self._apply_src_type(wid)
-        if kind == "custom":
+        if kind in ("custom", "dns"):
             self.query_one(f"#{wid}-custom", Input).value = name
         else:
             self._set_select_value(self.query_one(f"#{wid}-val", Select),
                                    raw_value)
 
     def _src_raw_value(self, wid: str) -> str:
-        """The raw -s/-d value the field currently represents ("" for any)."""
+        """The raw -s/-d value the field currently represents ("" for any).
+        Set-match kinds (hostgroup/networkgroup/dns) are emitted as
+        'func(x) src|dst' (direction by field) so build_rule puts them in
+        the body without a -s/-d prefix."""
         kind = self.query_one(f"#{wid}-type", Select).value
         if kind in ("", "any"):
             return ""
+        direction = "src" if wid.endswith("src") else "dst"
+        if kind in SET_MATCH_KINDS:
+            if kind == "dns":
+                value = self.query_one(f"#{wid}-custom", Input).value.strip()
+                if not value:
+                    return ""
+                return f"dns({value}) {direction}"
+            value = self.query_one(f"#{wid}-val", Select).value or ""
+            return f"{value} {direction}" if value else ""
         if kind == "custom":
             return self.query_one(f"#{wid}-custom", Input).value.strip()
         return self.query_one(f"#{wid}-val", Select).value or ""
@@ -511,7 +543,6 @@ class RuleEditor(ModalScreen):
             row.set_class(show_log, "-show")
 
     def _sync_from_raw(self) -> None:
-        import re
         self._syncing = True
         try:
             raw = self.query_one("#f-raw", TextArea).text
@@ -533,6 +564,18 @@ class RuleEditor(ModalScreen):
                             w.value = m.group(1)
                         else:
                             self._set_select_value(w, m.group(1))
+            # ipset set-match sources/destinations appear in the rule body
+            # as 'func(x) src' / 'func(x) dst' (no -s/-d prefix)
+            for func, direction, wid in (
+                    ("hostgroup", "src", "#f-src"),
+                    ("hostgroup", "dst", "#f-dst"),
+                    ("networkgroup", "src", "#f-src"),
+                    ("networkgroup", "dst", "#f-dst"),
+                    ("dns", "src", "#f-src"),
+                    ("dns", "dst", "#f-dst")):
+                m = re.search(rf"{func}\(([^)]+)\)\s+{direction}\b", raw)
+                if m:
+                    self._set_src_value(wid, f"{func}({m.group(1)})")
             # DNAT/SNAT rules use the long form --destination; capture it too
             m = re.search(r"--destination\s+(\S+)", raw)
             if m:
@@ -629,7 +672,6 @@ class RuleEditor(ModalScreen):
     def _current_field_value(self, wid: str) -> str:
         """The value the field had before '(custom ...)' was picked: the raw
         text is untouched at this point, so parse it."""
-        import re
         raw = self.query_one("#f-raw", TextArea).text
         if wid == "f-svc":
             m = (re.search(r"dservices\(([^)]+)\)", raw)
@@ -871,16 +913,8 @@ class DbEntryEditor(ModalScreen):
         self.query_one("#db-key").focus()
 
     def _validate(self, key: str, value: str) -> list[str]:
-        errs = []
-        if not key:
-            errs.append("name is empty")
-        for l in self.app.dblines:
-            if (l.kind == "entry" and l.section == self.section
-                    and l.key == key and l is not self.orig):
-                errs.append(f"'{key}' already exists in [{self.section}]")
-                break
-        errs.extend(expand.validate_db_value(self.section, value, self.app.db))
-        return errs
+        return self.app._validate_db_entry(self.section, key, value,
+                                           orig=self.orig)
 
     def action_save(self) -> None:
         key = self.query_one("#db-key", Input).value.strip()
@@ -1123,6 +1157,49 @@ class ValidationReport(ModalScreen):
         self.dismiss(None)
 
 
+class DeleteBlockedReport(ModalScreen):
+    """Shown when a db entry is still in use by rules or other db entries,
+    so it cannot be deleted. Lists the references; no delete is performed."""
+
+    CSS = """
+    DeleteBlockedReport #report-list { height: 20; }
+    """
+
+    BINDINGS = [Binding("escape", "close", "Close"),
+                Binding("q", "close", "Close")]
+
+    def __init__(self, section, key, rule_refs, db_refs) -> None:
+        super().__init__()
+        self.section = section
+        self.key = key
+        self.rule_refs = rule_refs
+        self.db_refs = db_refs
+
+    def compose(self) -> ComposeResult:
+        n = len(self.rule_refs) + len(self.db_refs)
+        yield Static(
+            f"'{self.key}' ({self.section}) is used by {n} "
+            f"reference(s) and can't be deleted.",
+            classes="modal-title")
+        items = []
+        for host, l in self.rule_refs:
+            items.append(ListItem(Label(
+                f"rule  {host} [{l.table}{l.proto}] {l.value}")))
+        for l in self.db_refs:
+            items.append(ListItem(Label(
+                f"db    [{l.section}] {l.key}={l.value}")))
+        yield ListView(*items, id="report-list")
+        with Horizontal(id="modal-buttons"):
+            yield Button("Close", id="btn-close")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-close":
+            self.dismiss(None)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 # ---------------------------------------------------------------------------
 # generic output modal (deploy, git diff)
 
@@ -1235,7 +1312,6 @@ class GitHistory(ModalScreen):
         lv.focus()
 
     def _git(self, *args: str) -> tuple[str, str]:
-        import subprocess
         try:
             proc = subprocess.run(
                 ["git", "-C", self.fwdir, *args],
@@ -1449,7 +1525,6 @@ class CommitModal(ModalScreen):
         self.run_worker(self._commit_worker(msg), exclusive=True)
 
     async def _commit_worker(self, msg: str) -> None:
-        import asyncio
         try:
             add = await asyncio.create_subprocess_exec(
                 "git", "-C", self.fwdir, "add", "--", *self.files,
@@ -1692,13 +1767,15 @@ class FirewallApp(App):
     def _rebuild_db(self) -> None:
         self.db = expand.Db(self.dblines)
 
-    def _load_with_includes(self, path: str, out: list) -> None:
-        """Parse a rules file, splicing [#include] content inline.
-        Every line is tagged with the file it came from, so edits can be
-        written back to the right file."""
-        with open(path) as fh:
-            lines = parser.parse_rules(fh.read())
-        for l in lines:
+    def _load_with_includes(self, path: str, out: list,
+                            content: str | None = None) -> None:
+        """Parse a rules file (or in-memory content), splicing [#include]
+        content inline. Every line is tagged with the file it came from, so
+        edits can be written back to the right file."""
+        if content is None:
+            with open(path) as fh:
+                content = fh.read()
+        for l in parser.parse_rules(content):
             l.source = path
             if l.kind == "include":
                 out.append(l)
@@ -1736,7 +1813,7 @@ class FirewallApp(App):
         included even when empty for this table (the view's hide_empty flag
         decides whether they show)."""
         rows: list[tuple] = []
-        globals_ = {l.key: l.value for l in parser.global_lines(self.lines)}
+        globals_ = parser.global_dict(self.lines)
         show_implicit = "filter" in tables
         if show_implicit:
             top_groups, bottom_groups = implicit.implicit_rules(globals_)
@@ -1775,7 +1852,7 @@ class FirewallApp(App):
         keys not present in the file (marked '(default)')."""
         t = self.query_one("#global-table", DataTable)
         t.clear()
-        present = {l.key: l.value for l in parser.global_lines(self.lines)}
+        present = parser.global_dict(self.lines)
         for key in GLOBAL_ORDER:
             if key in present:
                 t.add_row(key, present[key], "")
@@ -1785,13 +1862,28 @@ class FirewallApp(App):
     def _global_default(self, key: str) -> str:
         """Effective default for a global key (policy_* inherits policy,
         log_* inherits log)."""
+        present = parser.global_dict(self.lines)
         if key.startswith("policy_"):
-            present = {l.key: l.value for l in parser.global_lines(self.lines)}
             return present.get("policy", GLOBAL_DEFAULTS["policy"])
         if key.startswith("log_"):
-            present = {l.key: l.value for l in parser.global_lines(self.lines)}
             return present.get("log", "")
         return GLOBAL_DEFAULTS[key]
+
+    def _insert_after_section(self, lines: list, section_name: str,
+                              new_line, kind: str,
+                              source: str | None = None) -> bool:
+        """Insert new_line after the last line of `kind` in the section
+        named section_name (optionally matching source). Returns True when
+        the section was found and the line inserted."""
+        for i, l in enumerate(lines):
+            if (l.kind == "section" and l.name == section_name
+                    and (source is None or l.source == source)):
+                j = i
+                while j + 1 < len(lines) and lines[j + 1].kind == kind:
+                    j += 1
+                lines.insert(j + 1, new_line)
+                return True
+        return False
 
     def _insert_global(self, key: str, value: str) -> None:
         """Insert a global key=value line after the [global] header (creating
@@ -1800,14 +1892,8 @@ class FirewallApp(App):
         line = parser.Line(raw=f"{key}={value}", kind="global", key=key,
                            value=value)
         line.source = host
-        for i, l in enumerate(self.lines):
-            if l.kind == "section" and l.name == "global":
-                j = i
-                while j + 1 < len(self.lines) \
-                        and self.lines[j + 1].kind == "global":
-                    j += 1
-                self.lines.insert(j + 1, line)
-                return
+        if self._insert_after_section(self.lines, "global", line, "global"):
+            return
         header = parser.Line(raw="[global]", kind="section", name="global")
         header.source = host
         self.lines.insert(0, header)
@@ -2111,6 +2197,11 @@ class FirewallApp(App):
 
     def _add_rule(self) -> None:
         rk, info = self._selected_row()
+        if info and info[0] == "include":
+            # an include is a container of sections: 'a' adds a section to
+            # the include file itself
+            self._add_include_section(info[1])
+            return
         section = None
         section_source = None
         if info and info[0] == "rule":
@@ -2154,20 +2245,14 @@ class FirewallApp(App):
             return
         self._snapshot()
         # find the section line (in the file it came from)
-        for i, l in enumerate(self.lines):
-            if (l.kind == "section" and l.name == section
-                    and l.source == section_source):
-                j = i
-                while j + 1 < len(self.lines) and self.lines[j + 1].kind == "rule":
-                    j += 1
-                key = result["table"] + result["proto"]
-                new_line = parser.Line(
-                    raw=f"{key}={result['text']}", kind="rule", key=key,
-                    value=result["text"], table=result["table"],
-                    proto=result["proto"])
-                new_line.source = section_source
-                self.lines.insert(j + 1, new_line)
-                break
+        key = result["table"] + result["proto"]
+        new_line = parser.Line(
+            raw=f"{key}={result['text']}", kind="rule", key=key,
+            value=result["text"], table=result["table"],
+            proto=result["proto"])
+        new_line.source = section_source
+        self._insert_after_section(self.lines, section, new_line, "rule",
+                                   source=section_source)
         self.dirty = True
         self._populate_rules()
         # jump to the tab of the rule's table and select it there
@@ -2197,6 +2282,13 @@ class FirewallApp(App):
                 Prompt("Rename section", value=info[1]),
                 lambda res, old=info[1], src=info[2]:
                 self._on_rename_section(old, src, res))
+            return
+        if kind == "include":
+            self.push_screen(
+                Prompt("Rename include", value=info[1],
+                       placeholder="include filename"),
+                lambda res, old=info[1]:
+                self._rename_include(old, res))
             return
         if kind == "rule":
             line = info[1]
@@ -2270,6 +2362,9 @@ class FirewallApp(App):
             self.dirty = True
             self._populate_rules()
             return
+        if kind == "include":
+            self._delete_include(info[1])
+            return
         if kind == "rule":
             line = info[1]
             if line in self.lines:
@@ -2277,10 +2372,137 @@ class FirewallApp(App):
             self.dirty = True
             self._populate_rules()
 
+    # -- include bars ------------------------------------------------------
+    # [#name] bars behave like sections: rename (e), delete (d), reorder
+    # (ctrl+up/down), and 'a' adds a section into the include file. The
+    # include content is shared across hosts, so deleting/renaming only
+    # changes the host's reference (and what this host includes) — the
+    # shared include file is left untouched (not rewritten on save).
+
+    @staticmethod
+    def _include_span(lines, idx: int) -> list:
+        """The lines belonging to include lines[idx] (transitively): every
+        following line until the next sibling line from the same source file
+        (which ends this include's content, whether it is a section or
+        another include in the same file)."""
+        inc = lines[idx]
+        out: list = []
+        j = idx + 1
+        while j < len(lines) and lines[j].source != inc.source:
+            out.append(lines[j])
+            j += 1
+        return out
+
+    def _find_include(self, name: str):
+        for l in self.lines:
+            if l.kind == "include" and l.name == name:
+                return l
+        return None
+
+    def _delete_include(self, name: str) -> None:
+        inc = self._find_include(name)
+        if inc is None:
+            return
+        self._snapshot()
+        idx = self.lines.index(inc)
+        span = self._include_span(self.lines, idx)
+        del self.lines[idx:idx + len(span) + 1]
+        self.dirty = True
+        self._populate_rules()
+
+    def _rename_include(self, old: str, new: str) -> None:
+        if not new or new == old:
+            return
+        self._snapshot()
+        inc = self._find_include(old)
+        if inc is None:
+            return
+        idx = self.lines.index(inc)
+        span = self._include_span(self.lines, idx)
+        before = self.lines[:idx]
+        after = self.lines[idx + len(span) + 1:]
+        new_inc = parser.Line(raw=f"[#{new}]", kind="include", name=new)
+        new_inc.source = inc.source
+        new_content: list = []
+        new_path = os.path.join(self.includedir, new)
+        if os.path.isfile(new_path):
+            self._load_with_includes(new_path, new_content)
+        self.lines = before + [new_inc] + new_content + after
+        self.dirty = True
+        self._populate_rules()
+
+    def _move_include(self, name: str, direction: str):
+        """Swap an include block with the adjacent include in the same file.
+        Does not cross into sibling sections/rules. Returns the include line
+        if moved."""
+        inc = self._find_include(name)
+        if inc is None:
+            return None
+        self._snapshot()
+        idx = self.lines.index(inc)
+        span = self._include_span(self.lines, idx)
+        block_len = len(span) + 1
+        step = 1 if direction == "down" else -1
+        j = idx + block_len if direction == "down" else idx - 1
+        target = None
+        while 0 <= j < len(self.lines):
+            l = self.lines[j]
+            if l.source != inc.source:
+                j += step  # skip nested include content
+                continue
+            if l.kind == "include":
+                target = j
+                break
+            break  # a sibling section/rule in the same file: don't cross
+        if target is None:
+            return None
+        t_span = self._include_span(self.lines, target)
+        t_block_len = len(t_span) + 1
+        block = self.lines[idx:idx + block_len]
+        del self.lines[idx:idx + block_len]
+        if target > idx:
+            target -= block_len
+        if direction == "down":
+            self.lines[target + t_block_len: target + t_block_len] = block
+        else:
+            self.lines[target: target] = block
+        self.dirty = True
+        self._populate_rules()
+        return inc
+
+    def _add_include_section(self, name: str) -> None:
+        inc = self._find_include(name)
+        if inc is None:
+            return
+        self.push_screen(
+            Prompt("New section name", placeholder="e.g. allow web from admin"),
+            lambda res, i=inc: self._on_add_include_section(i, res))
+
+    def _on_add_include_section(self, inc, name) -> None:
+        if not name:
+            return
+        self._snapshot()
+        idx = self.lines.index(inc)
+        span = self._include_span(self.lines, idx)
+        insert_at = idx + len(span) + 1
+        inc_path = os.path.join(self.includedir, inc.name)
+        if insert_at > 0 and self.lines[insert_at - 1].kind != "blank":
+            blank = parser.Line(raw="", kind="blank")
+            blank.source = inc_path
+            self.lines.insert(insert_at, blank)
+            insert_at += 1
+        new_line = parser.Line(raw=f"[{name}]", kind="section", name=name)
+        new_line.source = inc_path
+        self.lines.insert(insert_at, new_line)
+        self.dirty = True
+        self._populate_rules()
+        view = self._active_rules_view()
+        if view:
+            view.expand_section(name)
+
     # -- reordering ---------------------------------------------------------
     def _snapshot(self) -> None:
         """Push the current lines/dblines onto the undo stack."""
-        import copy
         self.undo_stack.append((copy.deepcopy(self.lines),
                                 copy.deepcopy(self.dblines)))
         if len(self.undo_stack) > 50:
@@ -2319,6 +2541,10 @@ class FirewallApp(App):
                     if moved and view:
                         view.select_section(l.name, l.source)
                     break
+        elif kind == "include":
+            moved = self._move_include(info[1], event.direction)
+            if moved and view:
+                view.select_include(moved.name)
         elif kind in ("implicit", "implicit-section"):
             self.notify("Implicit rules cannot be reordered",
                         severity="warning")
@@ -2540,31 +2766,32 @@ class FirewallApp(App):
         self._populate_rules()
 
     # -- db tab -------------------------------------------------------------
-    def _add_db_entry_direct(self, section: str, key: str, value: str) -> bool:
-        """Add a db entry (used from the rule editor). Validates first;
-        returns True when the entry was added."""
+    def _validate_db_entry(self, section: str, key: str, value: str,
+                           orig=None) -> list[str]:
+        """Validate a db entry (name non-empty, no duplicate, value valid).
+        `orig` is the DbLine being edited (skipped in the duplicate check)."""
         errs = []
         if not key:
             errs.append("name is empty")
         for l in self.dblines:
-            if l.kind == "entry" and l.section == section and l.key == key:
+            if (l.kind == "entry" and l.section == section
+                    and l.key == key and l is not orig):
                 errs.append(f"'{key}' already exists in [{section}]")
                 break
         errs.extend(expand.validate_db_value(section, value, self.db))
+        return errs
+
+    def _add_db_entry_direct(self, section: str, key: str, value: str) -> bool:
+        """Add a db entry (used from the rule editor). Validates first;
+        returns True when the entry was added."""
+        errs = self._validate_db_entry(section, key, value)
         if errs:
             self.notify("; ".join(errs), severity="error")
             return False
         self._snapshot()
-        for i, l in enumerate(self.dblines):
-            if l.kind == "section" and l.section == section:
-                j = i
-                while j + 1 < len(self.dblines) \
-                        and self.dblines[j + 1].kind == "entry":
-                    j += 1
-                self.dblines.insert(j + 1, parser.DbLine(
-                    raw=f"{key}={value}", kind="entry",
-                    section=section, key=key, value=value))
-                break
+        self._insert_after_section(self.dblines, section, parser.DbLine(
+            raw=f"{key}={value}", kind="entry", section=section,
+            key=key, value=value), "entry")
         self.dirty = True
         self._rebuild_db()
         self._populate_db()
@@ -2591,15 +2818,10 @@ class FirewallApp(App):
             return
         self._snapshot()
         key, value = result["key"], result["value"]
-        for i, l in enumerate(self.dblines):
-            if l.kind == "section" and l.section == self.current_dbsection:
-                j = i
-                while j + 1 < len(self.dblines) and self.dblines[j + 1].kind == "entry":
-                    j += 1
-                self.dblines.insert(j + 1, parser.DbLine(
-                    raw=f"{key}={value}", kind="entry",
-                    section=self.current_dbsection, key=key, value=value))
-                break
+        self._insert_after_section(self.dblines, self.current_dbsection,
+                                   parser.DbLine(
+            raw=f"{key}={value}", kind="entry",
+            section=self.current_dbsection, key=key, value=value), "entry")
         self.dirty = True
         self._rebuild_db()
         self._populate_db()
@@ -2642,13 +2864,38 @@ class FirewallApp(App):
         if not info or info[0] != "dbentry":
             self.notify("Select a db entry to delete", severity="warning")
             return
-        self._snapshot()
         e = self.dblines[info[4]]
+        section, key = e.section, e.key
+        # cross-check that nothing still references this entry before deleting:
+        # (1) rules in any host ruleset, (2) other db entries (groups).
+        rule_refs: list[tuple[str, parser.Line]] = []
+        for host, lines in self._all_ruleset_lines():
+            for l in lines:
+                if l.kind == "rule" and expand.rule_references(
+                        l.value, section, key):
+                    rule_refs.append((host, l))
+        db_refs = expand.db_group_refs(self.dblines, section, key)
+        if rule_refs or db_refs:
+            self.push_screen(DeleteBlockedReport(
+                section, key, rule_refs, db_refs))
+            return
+        self._snapshot()
         if e in self.dblines:
             self.dblines.remove(e)
         self.dirty = True
         self._rebuild_db()
         self._populate_db()
+
+    def _all_ruleset_lines(self) -> list[tuple[str, list]]:
+        """Return (host, lines) for every host ruleset, includes spliced."""
+        out: list[tuple[str, list]] = []
+        for host in self.hosts:
+            lines: list = []
+            path = os.path.join(self.fwdir, host)
+            if os.path.isfile(path):
+                self._load_with_includes(path, lines)
+            out.append((host, lines))
+        return out
 
     # -- validate / save ----------------------------------------------------
     def action_validate(self) -> None:
@@ -2658,16 +2905,13 @@ class FirewallApp(App):
         issues = expand.validate_rules(self.lines, self.db)
         gerrs = expand.validate_globals(self.lines)
         if gerrs:
-            from .expand import RuleIssue
-            issues.append(RuleIssue("global", "", "", "", gerrs, []))
+            issues.append(expand.RuleIssue("global", "", "", "", gerrs, []))
         dupes = expand.validate_duplicate_sections(self.lines)
         if dupes:
-            from .expand import RuleIssue
-            issues.append(RuleIssue("(sections)", "", "", "", dupes, []))
+            issues.append(expand.RuleIssue("(sections)", "", "", "", dupes, []))
         prowarns = expand.validate_proto_coverage(self.lines)
         if prowarns:
-            from .expand import RuleIssue
-            issues.append(RuleIssue("global", "", "", "", [], prowarns))
+            issues.append(expand.RuleIssue("global", "", "", "", [], prowarns))
         self.push_screen(ValidationReport(issues), self._on_validation_result)
 
     def _on_validation_result(self, issue) -> None:
@@ -2708,9 +2952,6 @@ class FirewallApp(App):
     async def _preview_worker(self, host: str, modal: DeployModal) -> None:
         """Run the type's manifest in generate-only mode (with a stubbed
         cdist object/global layout) and show the generated restore files."""
-        import asyncio
-        import shutil
-        import tempfile
         # wait until the modal is mounted so early output is not lost
         while not modal.is_mounted:
             await asyncio.sleep(0.01)
@@ -2789,8 +3030,6 @@ class FirewallApp(App):
 
     async def _deploy_worker(self, host: str, modal: DeployModal) -> None:
         """Run the deploy command, streaming its output to the modal."""
-        import asyncio
-        import shlex
         # wait until the modal is mounted so early output is not lost
         while not modal.is_mounted:
             await asyncio.sleep(0.01)
@@ -2837,7 +3076,7 @@ class FirewallApp(App):
         self._snapshot()
         host = os.path.join(self.fwdir, self.current_host)
         self.lines = []
-        self._load_content_with_includes(result["content"], host, self.lines)
+        self._load_with_includes(host, self.lines, content=result["content"])
         # dirty only if the loaded state differs from what is on disk
         # (loading the working tree back should not leave unsaved changes)
         try:
@@ -2854,26 +3093,11 @@ class FirewallApp(App):
                  else result["commit"][:8])
         self.notify(f"Loaded {label} - review and save (ctrl+s)")
 
-    def _load_content_with_includes(self, content: str, path: str,
-                                    out: list) -> None:
-        """Like _load_with_includes but from in-memory content (for loading
-        a git version of the host file; include files stay current)."""
-        for l in parser.parse_rules(content):
-            l.source = path
-            if l.kind == "include":
-                out.append(l)
-                inc_path = os.path.join(self.includedir, l.name)
-                if os.path.isfile(inc_path):
-                    self._load_with_includes(inc_path, out)
-            else:
-                out.append(l)
-
     # -- git ---------------------------------------------------------------
     def _git_info(self) -> tuple[bool, str]:
         """(is_inside_work_tree, repo toplevel) for the firewall dir.
         Cached: the repo status does not change mid-session."""
         if self._git_info_cache is None:
-            import subprocess
             try:
                 proc = subprocess.run(
                     ["git", "-C", self.fwdir, "rev-parse",

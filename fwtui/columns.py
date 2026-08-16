@@ -45,10 +45,10 @@ def rule_columns(text: str, db: Db) -> dict:
         cols["chain"] = m.group(1).lower()
 
     # source/destination via ipset set matches
-    m = re.search(r"(?:hostgroup|networkgroup)\(([^)]+)\)\s+src", text)
+    m = re.search(r"(?:hostgroup|networkgroup|dns)\(([^)]+)\)\s+src", text)
     if m:
         cols["from"] = m.group(1)
-    m = re.search(r"(?:hostgroup|networkgroup)\(([^)]+)\)\s+dst", text)
+    m = re.search(r"(?:hostgroup|networkgroup|dns)\(([^)]+)\)\s+dst", text)
     if m:
         cols["to"] = m.group(1)
 

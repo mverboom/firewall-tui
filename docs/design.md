@@ -44,7 +44,8 @@ repo.
 3. **Validation** — the type's manifest expands functions at deploy time.
    The expansion logic was mirrored in Python (`expand.py`: host, hosts,
    hostgroup, network, networkgroup, service, dservice, dservices, reject,
-   log, with DNS fallback). Validation reports per-rule errors/warnings
+   log, with DNS fallback). `dns()` (a periodically re-resolved host via
+   ipset) is supported too. Validation reports per-rule errors/warnings
    instead of aborting. (The type still has an open ToDo: "add option to
    generate rules but not install them", which would make validation
    authoritative.)
@@ -107,7 +108,10 @@ Working features (all in `fwtui/`):
   spacing normalized on section moves; selection preserved after edits.
 - `[#include]` support: spliced inline, amber bars, nested includes,
   missing-include markers, edits written back to the source file, save
-  writes host file + include files separately.
+  writes host file + include files separately. Include bars behave like
+  sections: rename (`e`), delete (`d`), reorder (ctrl+up/down), and `a`
+  adds a section into the included file; deleting/renaming only changes the
+  host's `[#name]` reference (the shared include file is not rewritten).
 - Validation (`v`): rule expansion, global values, duplicate sections,
   proto coverage ("no IPv6 rules" warning), `@command` db expansion.
 - Preview (`g`): generated iptables rules per proto, mirroring the
