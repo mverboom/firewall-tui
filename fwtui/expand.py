@@ -439,6 +439,33 @@ def rule_references(value: str, section: str, key: str) -> bool:
     return any(_func_refers(f, a, section, key) for f, a in _rule_funcs(value))
 
 
+def rule_db_refs(value: str, db: Db | None = None) -> set[tuple[str, str]]:
+    """The db (section, key) objects a rule text references. dns() is a
+    domain (no db entry) and is omitted; dservices()/hosts() split their
+    comma lists into the individual leaf objects."""
+    refs: set[tuple[str, str]] = set()
+    groups = getattr(db, "servicegroups", {}) if db is not None else {}
+    for funcname, args in _rule_funcs(value):
+        if funcname == "dservices":
+            if args in groups:
+                refs.add(("servicegroups", args))
+            else:
+                for s in args.split(","):
+                    s = s.strip()
+                    if s:
+                        refs.add(("services", s))
+        elif funcname == "hosts":
+            for h in args.split(","):
+                h = h.strip()
+                if h:
+                    refs.add(("hosts", h))
+        else:
+            section = _FUNC_TO_SECTION.get(funcname)
+            if section:
+                refs.add((section, args))
+    return refs
+
+
 def db_group_refs(lines, section: str, key: str):
     """Db entries (groups) that reference a leaf entry (section, key).
     Groups list members of leaf sections only (no group-in-group nesting).

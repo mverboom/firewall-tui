@@ -100,9 +100,10 @@ Working features (all in `fwtui/`):
   exist in the db; errors are shown inline and the modal stays open.
   `@command` values are not validated. `w` (where used) and the delete
   in-use guard both open a `DbReferencesReport` listing every reference
-  (rules across all hosts, plus nested db groups); enter on a rule line
-  switches to that host and highlights the rule, confirming first when
-  unsaved edits would be discarded.
+  (rules across all hosts, plus nested db groups). On a selected rule,
+  where-used lists where the db objects that rule references are used in
+  other firewalls. Enter on a rule line switches to that host and highlights
+  the rule, confirming first when unsaved edits would be discarded.
 - Rule editor: builder form + raw text, two-way sync (debounced so partial
   typing doesn't pollute the dropdowns); DNAT/SNAT rows only shown for NAT
   actions; `a` adds a db entry without leaving the editor; `tab` cycles the

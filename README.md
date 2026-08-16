@@ -34,9 +34,11 @@ Documentation:
   with per-section validation: IPs (hosts), network/mask (networks),
   port/proto or icmp[/type] (services), and group members checked against
   the db; invalid values are rejected inline, `@command` values are exempt.
-  `w` shows where a db entry is used (rules in any host + nested db groups);
-  enter on a rule line jumps to that host and highlights the rule (the same
-  report appears on delete when the entry is still in use).
+  `w` shows where a selection is used: on a db entry, every reference to it
+  across all hosts and nested db groups; on a rule, where the db objects it
+  references are used in other firewalls. Enter on a rule line jumps to that
+  host and highlights the rule (the same report appears on delete when an
+  entry is still in use).
 - **Rule editor**: a builder form for the common patterns (chain, `-i`, `-s`,
   `-d`, `dservice`, action, DNAT/SNAT target, extra options) with a live
   raw-text preview; the raw text is authoritative and editable, and the two
@@ -165,7 +167,7 @@ Main views:
 | `e` | edit selected rule / db entry / global key; on a section: rename |
 | `enter` | rule/entry: edit (same as `e`); section/header bar: toggle collapse |
 | `d` | delete selected rule / section / db entry / global key |
-| `w` | where used: show every reference to the selected db entry |
+| `w` | where used: on a db entry, every reference to it; on a rule, where its db objects are used in other firewalls |
 | `n` | new section (Rules tab) |
 | `v` | validate current ruleset |
 | `p` | show generated-rules preview |

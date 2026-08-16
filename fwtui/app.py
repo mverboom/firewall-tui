@@ -2897,23 +2897,66 @@ class FirewallApp(App):
         return rule_refs, db_refs
 
     def action_where_used(self) -> None:
-        """u: show every use of the selected db entry (rules in any host +
-        nested db references), and jump to a rule on enter."""
-        if not self.db_mode:
-            self.notify("Where-used works on db entries (db tab)",
+        """w: show where the selection is used. On a db entry, show every
+        reference to it; on a rule, show where the db objects it references
+        are used across all hosts. Enter on a rule line jumps to it."""
+        if self.db_mode:
+            rk, info = self._selected_row()
+            if not info or info[0] != "dbentry":
+                self.notify("Select a db entry to inspect", severity="warning")
+                return
+            e = self.dblines[info[4]]
+            section, key = e.section, e.key
+            rule_refs, db_refs = self._collect_db_refs(section, key)
+            n = len(rule_refs) + len(db_refs)
+            self.push_screen(DbReferencesReport(
+                section, key, rule_refs, db_refs,
+                title=f"Where used: '{key}' ({section}) — {n} reference(s)"),
+                self._on_db_ref_jump)
+            return
+        # rule mode: which db objects does this rule use, and where are they
+        # used across all firewalls?
+        rk, info = self._selected_row()
+        if not info or info[0] != "rule":
+            self.notify("Where-used works on a rule or a db entry",
                         severity="warning")
             return
-        rk, info = self._selected_row()
-        if not info or info[0] != "dbentry":
-            self.notify("Select a db entry to inspect", severity="warning")
+        line = info[1]
+        refs = expand.rule_db_refs(line.value, self.db)
+        if not refs:
+            self.notify("This rule references no db objects",
+                        severity="warning")
             return
-        e = self.dblines[info[4]]
-        section, key = e.section, e.key
-        rule_refs, db_refs = self._collect_db_refs(section, key)
+        rule_refs: list[tuple[str, str, parser.Line]] = []
+        for host, lines in self._all_ruleset_lines():
+            current = "(no section)"
+            for l in lines:
+                if l.kind == "section":
+                    current = l.name
+                    continue
+                if l.kind != "rule":
+                    continue
+                if not any(expand.rule_references(l.value, s, k)
+                           for s, k in refs):
+                    continue
+                # skip the rule being inspected (same host + text)
+                if host == self.current_host and l.value == line.value \
+                        and l.table == line.table and l.proto == line.proto:
+                    continue
+                rule_refs.append((host, current, l))
+        db_refs: list = []
+        seen: set[tuple[str, str]] = set()
+        for section, key in refs:
+            for l in expand.db_group_refs(self.dblines, section, key):
+                if (l.section, l.key) not in seen:
+                    seen.add((l.section, l.key))
+                    db_refs.append(l)
+        obj_label = ", ".join(f"{s}:{k}" for s, k in sorted(refs))
         n = len(rule_refs) + len(db_refs)
         self.push_screen(DbReferencesReport(
-            section, key, rule_refs, db_refs,
-            title=f"Where used: '{key}' ({section}) — {n} reference(s)"),
+            "", "", rule_refs, db_refs,
+            title=f"Where used: this rule's db objects ({obj_label}) — "
+                  f"{n} reference(s)"),
             self._on_db_ref_jump)
 
     def _delete_db_entry(self) -> None:
