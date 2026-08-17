@@ -295,6 +295,12 @@ class RulesView(ScrollView):
             key = self._key(row)
             if key in self.collapsed:
                 self.collapsed.discard(key)
+                # expanding a section inside an include also expands its
+                # parent include bar(s), so the section's rules show
+                if row[0] == "section" and row[2]:
+                    for inc in self.all_rows:
+                        if inc[0] == "include" and inc[2] == row[2]:
+                            self.collapsed.discard("include:" + inc[1])
             else:
                 self.collapsed.add(key)
             self._rebuild_visible()
