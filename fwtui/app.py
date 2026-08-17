@@ -1980,6 +1980,7 @@ class FirewallApp(App):
         decides whether they show)."""
         rows: list[tuple] = []
         globals_ = parser.global_dict(self.lines)
+        host = os.path.join(self.fwdir, self.current_host or "")
         show_implicit = "filter" in tables
         if show_implicit:
             top_groups, bottom_groups = implicit.implicit_rules(globals_)
@@ -1999,7 +2000,10 @@ class FirewallApp(App):
             if l.kind == "section" and l.name == "global":
                 continue  # [global] is shown as the Global tab
             if l.kind == "section":
-                rows.append(("section", l.name, l.source))
+                # sections from an include file are shown with an
+                # 'include: ' label (row[3] marks them)
+                rows.append(("section", l.name, l.source,
+                             l.source != host))
                 for r in parser.rules_in_section(self.lines, l):
                     if r.table not in tables:
                         continue

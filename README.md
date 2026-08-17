@@ -61,7 +61,9 @@ Documentation:
   be reordered within their section
 - **[#include] support**: include files are spliced inline, shown as amber
   bars, nested includes work, and edits are written back to the file they
-  came from (missing includes are marked). Include bars are full citizens:
+  came from (missing includes are marked). The sections inside an include
+  are shown as their own bars labeled `include: <section>` (editable like
+  normal sections). Include bars are full citizens:
   `e` renames the `[#name]` reference, `d` removes it from this ruleset,
   ctrl+up/down reorders them, and `a` adds a new section into the included
   file. Deleting/renaming only changes the host's reference (the shared

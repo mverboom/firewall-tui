@@ -116,7 +116,9 @@ Working features (all in `fwtui/`):
   spacing normalized on section moves; selection preserved after edits.
 - `[#include]` support: spliced inline, amber bars, nested includes,
   missing-include markers, edits written back to the source file, save
-  writes host file + include files separately. Include bars behave like
+  writes host file + include files separately. Sections inside an include
+  are shown as their own bars labeled `include: <section>` (editable like
+  normal sections). Include bars behave like
   sections: rename (`e`), delete (`d`), reorder (ctrl+up/down), and `a`
   adds a section into the included file; deleting/renaming only changes the
   host's `[#name]` reference (the shared include file is not rewritten).

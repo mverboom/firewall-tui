@@ -426,7 +426,10 @@ class RulesView(ScrollView):
             implicit = kind == "implicit-section"
             fg = IMPLICIT_FG if implicit else SECTION_FG
             bg = IMPLICIT_BG if implicit else SECTION_BG
-            return self._render_section(row[1], width, selected, fg, bg,
+            label = row[1]
+            if kind == "section" and len(row) > 3 and row[3]:
+                label = f"include: {row[1]}"
+            return self._render_section(label, width, selected, fg, bg,
                                         row[1])
         # rule / implicit rows carry their column dict as the last element
         return self._render_rule(row[-1], width, selected, kind == "implicit")
