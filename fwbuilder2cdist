@@ -1,0 +1,643 @@
+#!/usr/bin/env python3
+"""fwbuilder2cdist - convert a fwbuilder project to cdist __firewall rules + db.
+
+Usage:
+    fwbuilder2cdist --fwb firewall.fwb --firewall Sheppard [--outdir out/]
+                     [--output-name sheppard.cnw.verboom.net]
+
+Reads a fwbuilder project (XML) and emits, for the named firewall:
+    <output-name>.rules   - cdist __firewall rules file
+    <output-name>.db      - cdist __firewall database file
+
+The generated rules are flat: fwbuilder's user chains/jumps are gone by
+construction (rules are read from the logical Policy/NAT rules, not from
+generated iptables). Deliberate simplifications (reported as warnings):
+
+* Interface restrictions are only kept when the rule group name matches a
+  firewall interface name (e.g. group "Openvpn" -> -i/-o openvpn).
+* Inbound rules to the firewall itself do not get -d <firewall ip>.
+* The final "deny all, log" rule becomes policy=drop + log= in [global].
+* The loopback rule becomes the loopback global.
+* DNAT rules use the first public firewall IP as destination.
+"""
+
+import argparse
+import ipaddress
+import sys
+import xml.etree.ElementTree as ET
+
+NS = '{http://www.fwbuilder.org/1.0/}'
+
+# icmpv4 type -> icmpv6 type (best effort, falls back to the same number)
+ICMPV6 = {8: 128, 0: 129, 3: 1, 4: 2, 5: 137, 11: 3, 12: 4,
+          13: 130, 14: 131, 17: 134, 18: 135, 9: 138, 10: 139}
+
+
+def cidr(addr, netmask):
+    try:
+        return str(ipaddress.ip_network('%s/%s' % (addr, netmask), strict=False))
+    except ValueError:
+        return '%s/%s' % (addr, netmask)
+
+
+class ServiceRegistry:
+    """Collects services and assigns db names, handling tcp/udp name
+    collisions the same way as the existing cdist db (udp keeps the name,
+    tcp gets a _tcp suffix)."""
+
+    def __init__(self):
+        self.ports = {}   # (name, proto) -> port
+        self.icmp = {}    # name -> type
+        self.dbname = {}  # (name, proto) -> db name
+
+    def add_port(self, name, proto, port):
+        self.ports[(name, proto)] = port
+
+    def add_icmp(self, name, typ):
+        self.icmp[name] = typ
+
+    def finalize(self):
+        byname = {}
+        for (name, proto) in self.ports:
+            byname.setdefault(name, set()).add(proto)
+        for name, protos in byname.items():
+            if len(protos) == 1:
+                self.dbname[(name, next(iter(protos)))] = name
+            else:
+                self.dbname[(name, 'udp')] = name
+                self.dbname[(name, 'tcp')] = '%s_tcp' % name
+
+    def db(self):
+        d = {}
+        for (name, proto), port in self.ports.items():
+            d[self.dbname[(name, proto)]] = '%s/%s' % (port, proto)
+        for name, typ in self.icmp.items():
+            d[name] = 'icmp/%s' % typ if typ != '-1' else 'icmp'
+        return d
+
+
+class Converter:
+    def __init__(self, fwb, fw_name):
+        self.tree = ET.parse(fwb)
+        self.root = self.tree.getroot()
+        self.objects = {el.get('id'): el for el in self.root.iter() if el.get('id')}
+        self.fw = self._find_firewall(fw_name)
+        if self.fw is None:
+            sys.exit("error: firewall '%s' not found in project" % fw_name)
+        self.fw_name = fw_name
+        self.fw_ifaces = self._fw_interfaces()   # {name: [(ip, netmask), ...]}
+        self.lan_subnets = self._lan_subnets()
+        self.host_ips = {}   # host name -> [ip, ...]
+        self.svc = ServiceRegistry()
+        self.db = {k: {} for k in ('services', 'hosts', 'networks',
+                                   'hostgroups', 'networkgroups', 'servicegroups')}
+        self.rules = []      # (table, line, section)
+        self.nat = []        # ('nat', line, section)
+        self.warnings = []
+        self.log_global = False
+
+    # ---------- object helpers ----------
+
+    def _find_firewall(self, name):
+        for f in self.root.iter(NS + 'Firewall'):
+            if f.get('name') == name:
+                return f
+        return None
+
+    def _obj(self, ref):
+        return self.objects.get(ref)
+
+    def _name(self, ref):
+        o = self._obj(ref)
+        if o is None:
+            self.warnings.append('missing object %s' % ref)
+            return '<missing %s>' % ref
+        return o.get('name')
+
+    def _fw_interfaces(self):
+        res = {}
+        for itf in self.fw.iter(NS + 'Interface'):
+            ips = []
+            for addr in itf:
+                if addr.tag in (NS + 'IPv4', NS + 'IPv6'):
+                    ips.append((addr.get('address'), addr.get('netmask')))
+            res[itf.get('name')] = ips
+        return res
+
+    def _fw_ips(self):
+        return [ip for ips in self.fw_ifaces.values() for ip, _ in ips]
+
+    def _iface_is_wan(self, name):
+        # an interface is WAN if it has a public IPv4 address (a public IPv6
+        # on a LAN interface is just a routed subnet)
+        for ip, _ in self.fw_ifaces.get(name, []):
+            try:
+                a = ipaddress.ip_address(ip)
+                if a.version == 4 and not a.is_private:
+                    return True
+            except ValueError:
+                pass
+        return False
+
+    def _lan_subnets(self):
+        """networks served by non-WAN interfaces (the LAN side)."""
+        res = []
+        for name, ips in self.fw_ifaces.items():
+            if self._iface_is_wan(name):
+                continue
+            for ip, mask in ips:
+                try:
+                    res.append(ipaddress.ip_network('%s/%s' % (ip, mask), strict=False))
+                except ValueError:
+                    pass
+        return res
+
+    def _fw_public_ip(self):
+        for ip in self._fw_ips():
+            try:
+                if not ipaddress.ip_address(ip).is_private:
+                    return ip
+            except ValueError:
+                pass
+        return self._fw_ips()[0] if self._fw_ips() else None
+
+    def _fw_private_ip(self):
+        for ip in self._fw_ips():
+            try:
+                a = ipaddress.ip_address(ip)
+                if a.is_private and not a.is_link_local and a.version == 4:
+                    return ip
+            except ValueError:
+                pass
+        return None
+
+    def _host_ips(self, host_el):
+        ips = []
+        for itf in host_el.iter(NS + 'Interface'):
+            for addr in itf:
+                if addr.tag in (NS + 'IPv4', NS + 'IPv6'):
+                    ips.append(addr.get('address'))
+        return ips
+
+    def _is_fw_ip(self, ip):
+        return ip in self._fw_ips()
+
+    def _ip_in_lan(self, ip):
+        try:
+            a = ipaddress.ip_address(ip)
+        except ValueError:
+            return False
+        for net in self.lan_subnets:
+            if a in net:
+                return True
+        return False
+
+    def _net_in_lan(self, net):
+        try:
+            n = ipaddress.ip_network(net, strict=False)
+        except ValueError:
+            return False
+        for lan in self.lan_subnets:
+            if n.overlaps(lan):
+                return True
+        return False
+
+    def _net_has_fw_ip(self, net):
+        try:
+            n = ipaddress.ip_network(net, strict=False)
+        except ValueError:
+            return False
+        for ip in self._fw_ips():
+            try:
+                if ipaddress.ip_address(ip) in n:
+                    return True
+            except ValueError:
+                pass
+        return False
+
+    def _refs(self, rule, elname):
+        el = rule.find(NS + elname)
+        if el is None:
+            return []
+        return [r.get('ref') for r in el.iter(NS + 'ObjectRef')] + \
+               [r.get('ref') for r in el.iter(NS + 'ServiceRef')]
+
+    def _is_any(self, rule, elname):
+        for ref in self._refs(rule, elname):
+            o = self._obj(ref)
+            if o is None or o.get('name') != 'Any':
+                return False
+        return True
+
+    def _negated(self, rule, elname):
+        el = rule.find(NS + elname)
+        return el is not None and el.get('neg') == 'True'
+
+    # ---------- address / service resolution ----------
+
+    def _resolve_addr(self, ref):
+        """Return list of (kind, value) for a src/dst ref.
+        kind: host, network, literal, hostgroup, networkgroup."""
+        o = self._obj(ref)
+        if o is None:
+            self.warnings.append('missing object %s' % ref)
+            return []
+        tag = o.tag.split('}')[1]
+        name = o.get('name')
+        if tag == 'AnyNetwork':
+            return []
+        if tag == 'Host':
+            ips = self._host_ips(o)
+            if not ips:
+                self.warnings.append('host %s has no addresses' % name)
+                return []
+            self.host_ips[name] = ips
+            self.db['hosts'][name] = ' '.join(ips)
+            return [('host', name)]
+        if tag in ('Network', 'NetworkIPv6'):
+            self.db['networks'][name] = cidr(o.get('address'), o.get('netmask'))
+            return [('network', name)]
+        if tag in ('IPv4', 'IPv6'):
+            return [('literal', o.get('address'))]
+        if tag == 'ObjectGroup':
+            members = [r.get('ref') for r in o.iter(NS + 'ObjectRef')]
+            kinds = set()
+            for m in members:
+                for k, _ in self._resolve_addr(m):
+                    kinds.add(k)
+            if kinds <= {'host'}:
+                self.db['hostgroups'][name] = ','.join(self._name(m) for m in members)
+                return [('hostgroup', name)]
+            if kinds <= {'network'}:
+                self.db['networkgroups'][name] = ','.join(self._name(m) for m in members)
+                return [('networkgroup', name)]
+            res = []
+            for m in members:
+                res.extend(self._resolve_addr(m))
+            return res
+        if tag == 'Firewall':
+            return [('literal', ip) for ip in self._fw_ips()]
+        self.warnings.append('unhandled address object %s %s' % (tag, name))
+        return []
+
+    def _resolve_addrs(self, rule, elname):
+        res = []
+        for ref in self._refs(rule, elname):
+            res.extend(self._resolve_addr(ref))
+        return res
+
+    def _resolve_service(self, ref):
+        """Return list of (kind, ...) for a service ref.
+        kind: port (proto, port, name) or icmp (type, name)."""
+        o = self._obj(ref)
+        if o is None:
+            self.warnings.append('missing object %s' % ref)
+            return []
+        tag = o.tag.split('}')[1]
+        name = o.get('name')
+        if tag == 'AnyIPService':
+            return []
+        if tag == 'TCPService':
+            self.svc.add_port(name, 'tcp', o.get('dst_range_start'))
+            return [('port', 'tcp', o.get('dst_range_start'), name)]
+        if tag == 'UDPService':
+            self.svc.add_port(name, 'udp', o.get('dst_range_start'))
+            return [('port', 'udp', o.get('dst_range_start'), name)]
+        if tag in ('ICMPService', 'ICMP6Service'):
+            self.svc.add_icmp(name, o.get('type'))
+            return [('icmp', o.get('type'), name)]
+        if tag == 'ObjectGroup':
+            res = []
+            for m in [r.get('ref') for r in o.iter(NS + 'ServiceRef')]:
+                res.extend(self._resolve_service(m))
+            return res
+        self.warnings.append('unhandled service object %s %s' % (tag, name))
+        return []
+
+    def _resolve_services(self, rule, elname):
+        res = []
+        for ref in self._refs(rule, elname):
+            res.extend(self._resolve_service(ref))
+        return res
+
+    # ---------- rule generation ----------
+
+    def _net_cidr(self, name):
+        return self.db['networks'].get(name)
+
+    def _addr_is_internal(self, kind, value):
+        """True if the address is behind the firewall (LAN side)."""
+        if kind == 'literal':
+            return self._ip_in_lan(value) and not self._is_fw_ip(value)
+        if kind == 'host':
+            return any(self._ip_in_lan(ip) and not self._is_fw_ip(ip)
+                       for ip in self.host_ips.get(value, []))
+        if kind == 'network':
+            net = self._net_cidr(value)
+            return bool(net) and self._net_in_lan(net) and not self._net_has_fw_ip(net)
+        # hostgroup/networkgroup: assume LAN side (conservative)
+        return True
+
+    def _addr_is_fw(self, kind, value):
+        if kind == 'literal':
+            return self._is_fw_ip(value)
+        if kind == 'network':
+            net = self._net_cidr(value)
+            return bool(net) and self._net_has_fw_ip(net)
+        return False
+
+    def _chains(self, direction, srcs, dsts):
+        dst_fw = any(self._addr_is_fw(k, v) for k, v in dsts)
+        dst_int = any(self._addr_is_internal(k, v) for k, v in dsts)
+        src_fw = any(self._addr_is_fw(k, v) for k, v in srcs)
+        src_int = any(self._addr_is_internal(k, v) for k, v in srcs)
+        # a network that overlaps a LAN subnet (even if it also contains a
+        # firewall address) carries LAN traffic
+        src_lan_net = any(k == 'network' and self._net_in_lan(self._net_cidr(v))
+                          for k, v in srcs)
+        if direction == 'Inbound':
+            if dst_fw:
+                return ['INPUT']
+            return ['FORWARD'] if dst_int else ['INPUT']
+        if direction == 'Outbound':
+            if src_int or src_lan_net:
+                return ['FORWARD', 'OUTPUT']
+            return ['OUTPUT']
+        if direction == 'Forward':
+            return ['FORWARD']
+        # Both: all chains
+        return ['INPUT', 'OUTPUT', 'FORWARD']
+
+    def _iface_for_group(self, group):
+        for itf in self.fw_ifaces:
+            if group.lower() == itf.lower():
+                return itf
+        return None
+
+    def _addr_match(self, kind, value, side, neg):
+        bang = '! ' if neg else ''
+        if kind == 'host':
+            return '%s-%s host(%s)' % (bang, side, value)
+        if kind == 'network':
+            return '%s-%s network(%s)' % (bang, side, value)
+        if kind == 'literal':
+            return '%s-%s %s' % (bang, side, value)
+        if kind == 'hostgroup':
+            return 'hostgroup(%s) %s' % (value, '!%s' % side if neg else side)
+        if kind == 'networkgroup':
+            return 'networkgroup(%s) %s' % (value, '!%s' % side if neg else side)
+        return ''
+
+    def _service_variants(self, srvs):
+        """Return a list of service-match groups; one group per rule line.
+        Services of the same proto are combined (multiport), mixed protos
+        produce one group per proto."""
+        byproto = {}
+        icmps = []
+        for s in srvs:
+            if s[0] == 'port':
+                _, proto, port, name = s
+                byproto.setdefault(proto, []).append(
+                    (self.svc.dbname[(name, proto)], port))
+            else:
+                _, typ, name = s
+                icmps.append(name)
+        variants = []
+        for proto, svcs in byproto.items():
+            if len(svcs) == 1:
+                variants.append(['dservice(%s)' % svcs[0][0]])
+            else:
+                variants.append(['dservices(%s)' % ','.join(s[0] for s in svcs)])
+        if icmps:
+            variants.append(['dservice(%s)' % n for n in icmps])
+        return variants or [[]]
+
+    def _gen_policy(self):
+        for pol in self.fw.iter(NS + 'Policy'):
+            pname = pol.get('name') or ''
+            table = 'filter6' if 'ipv6' in pname.lower() else 'filter'
+            for rule in pol.iter(NS + 'PolicyRule'):
+                if rule.get('disabled') == 'True':
+                    continue
+                group = rule.get('group') or 'rules'
+                action = rule.get('action')
+                direction = rule.get('direction')
+                log = rule.get('log') == 'True'
+                # final deny-all rule -> policy=drop + log global
+                if (action == 'Deny' and self._is_any(rule, 'Src')
+                        and self._is_any(rule, 'Dst') and self._is_any(rule, 'Srv')):
+                    if log:
+                        self.log_global = True
+                    continue
+                # loopback rule -> handled by the loopback global
+                if group.lower() == 'loopback':
+                    continue
+                srcs = self._resolve_addrs(rule, 'Src')
+                dsts = self._resolve_addrs(rule, 'Dst')
+                srvs = self._resolve_services(rule, 'Srv')
+                chains = self._chains(direction, srcs, dsts)
+                iface = self._iface_for_group(group)
+                neg_src = self._negated(rule, 'Src')
+                neg_dst = self._negated(rule, 'Dst')
+                for chain in chains:
+                    for variant in self._service_variants(srvs):
+                        parts = ['-A %s' % chain]
+                        if iface:
+                            if chain == 'OUTPUT':
+                                parts.append('-o %s' % iface)
+                            else:
+                                parts.append('-i %s' % iface)
+                        for kind, value in srcs:
+                            parts.append(self._addr_match(kind, value, 's', neg_src))
+                        for kind, value in dsts:
+                            parts.append(self._addr_match(kind, value, 'd', neg_dst))
+                        parts.extend(variant)
+                        if action == 'Accept':
+                            parts.append('-j ACCEPT')
+                        elif action == 'Deny':
+                            parts.append('-j DROP')
+                        elif action == 'Reject':
+                            parts.append('reject(reset)')
+                        if log:
+                            parts.append('log(%s)' % group)
+                        self.rules.append((table, ' '.join(parts), group))
+                        # interface rules on FORWARD apply in both directions
+                        if iface and chain == 'FORWARD':
+                            fwd = ' '.join(parts).replace('-i %s' % iface, '-o %s' % iface)
+                            self.rules.append((table, fwd, group))
+
+    def _nat_service_match(self, srvs):
+        """Return list of match strings, one per proto (mixed protos split)."""
+        byproto = {}
+        for s in srvs:
+            if s[0] == 'port':
+                _, proto, port, name = s
+                byproto.setdefault(proto, []).append(port)
+        out = []
+        for proto, ports in byproto.items():
+            if len(ports) == 1:
+                out.append('-p %s --dport %s' % (proto, ports[0]))
+            else:
+                out.append('-p %s -m multiport --dports %s' % (proto, ','.join(ports)))
+        return out
+
+    def _nat_target(self, tdst, tsrv, osrv):
+        """Resolve the DNAT --to-destination value (ip[:port])."""
+        if not tdst:
+            return ''
+        kind, value = tdst[0]
+        if kind == 'host':
+            dst = self.host_ips.get(value, [None])[0] or value
+        elif kind == 'literal':
+            dst = value
+        else:
+            dst = value
+        tport = None
+        for s in tsrv:
+            if s[0] == 'port':
+                tport = s[2]
+        if tport:
+            oport = None
+            for s in osrv:
+                if s[0] == 'port':
+                    oport = s[2]
+            if tport != oport:
+                dst = '%s:%s' % (dst, tport)
+        return dst
+
+    def _nat_snat_source(self, odst, wan, lan):
+        # traffic to a private/LAN destination is SNAT'd to the LAN address,
+        # everything else to the public address
+        for kind, value in odst:
+            if kind == 'literal' and self._ip_in_lan(value):
+                return lan or wan
+            if kind in ('network', 'host', 'hostgroup', 'networkgroup'):
+                return lan or wan
+        return wan or lan
+
+    def _gen_nat(self):
+        wan = self._fw_public_ip()
+        lan = self._fw_private_ip()
+        for nat in self.fw.iter(NS + 'NAT'):
+            for rule in nat.iter(NS + 'NATRule'):
+                if rule.get('disabled') == 'True':
+                    continue
+                group = rule.get('group') or 'nat'
+                osrc = self._resolve_addrs(rule, 'OSrc')
+                odst = self._resolve_addrs(rule, 'ODst')
+                osrv = self._resolve_services(rule, 'OSrv')
+                tsrc = self._resolve_addrs(rule, 'TSrc')
+                tdst = self._resolve_addrs(rule, 'TDst')
+                tsrv = self._resolve_services(rule, 'TSrv')
+                if tdst:
+                    # DNAT
+                    for sm in self._nat_service_match(osrv) or ['']:
+                        parts = ['-A PREROUTING']
+                        if wan:
+                            parts.append('-d %s' % wan)
+                        for kind, value in osrc:
+                            parts.append(self._addr_match(kind, value, 's', False))
+                        if sm:
+                            parts.append(sm)
+                        parts.append('-j DNAT --to-destination %s' % self._nat_target(tdst, tsrv, osrv))
+                        self.nat.append(('nat', ' '.join(parts), group))
+                    # hairpin SNAT (only when the source is restricted)
+                    if osrc:
+                        for sm in self._nat_service_match(osrv) or ['']:
+                            parts = ['-A POSTROUTING']
+                            for kind, value in osrc:
+                                parts.append(self._addr_match(kind, value, 's', False))
+                            for kind, value in tdst:
+                                parts.append(self._addr_match(kind, value, 'd', False))
+                            if sm:
+                                parts.append(sm)
+                            if lan:
+                                parts.append('-j SNAT --to-source %s' % lan)
+                            self.nat.append(('nat', ' '.join(parts), group))
+                else:
+                    # SNAT (tsrc set or translate to outgoing interface address)
+                    src = self._nat_snat_source(odst, wan, lan)
+                    for sm in self._nat_service_match(osrv) or ['']:
+                        parts = ['-A POSTROUTING']
+                        for kind, value in osrc:
+                            parts.append(self._addr_match(kind, value, 's', False))
+                        for kind, value in odst:
+                            parts.append(self._addr_match(kind, value, 'd', False))
+                        if sm:
+                            parts.append(sm)
+                        parts.append('-j SNAT --to-source %s' % src)
+                        self.nat.append(('nat', ' '.join(parts), group))
+
+    # ---------- output ----------
+
+    def run(self):
+        # first pass: collect all services so tcp/udp name collisions can be
+        # resolved before rules are generated
+        for pol in self.fw.iter(NS + 'Policy'):
+            for rule in pol.iter(NS + 'PolicyRule'):
+                if rule.get('disabled') != 'True':
+                    self._resolve_services(rule, 'Srv')
+        for nat in self.fw.iter(NS + 'NAT'):
+            for rule in nat.iter(NS + 'NATRule'):
+                if rule.get('disabled') != 'True':
+                    self._resolve_services(rule, 'OSrv')
+                    self._resolve_services(rule, 'TSrv')
+        self.svc.finalize()
+        self._gen_policy()
+        self._gen_nat()
+        self.db['services'] = self.svc.db()
+        return self._render()
+
+    def _render(self):
+        out = ['[global]', 'policy=drop', 'established=true', 'proto=4,6']
+        if self.log_global:
+            out.append('log=Unmatched traffic')
+        allrules = self.rules + self.nat
+        sections = []
+        for _, _, section in allrules:
+            if section not in sections:
+                sections.append(section)
+        for section in sections:
+            out.append('')
+            out.append('[%s]' % section)
+            for table, line, sec in allrules:
+                if sec == section:
+                    out.append('%s=%s' % (table, line))
+        return '\n'.join(out) + '\n'
+
+    def render_db(self):
+        out = []
+        for section in ('services', 'hosts', 'networks',
+                        'hostgroups', 'networkgroups', 'servicegroups'):
+            if not self.db[section]:
+                continue
+            out.append('[%s]' % section)
+            for name, value in sorted(self.db[section].items()):
+                out.append('%s=%s' % (name, value))
+            out.append('')
+        return '\n'.join(out)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('--fwb', required=True, help='fwbuilder project file (XML)')
+    ap.add_argument('--firewall', required=True, help='firewall name in the project')
+    ap.add_argument('--outdir', default='.', help='output directory')
+    ap.add_argument('--output-name', help='base name for output files (default: firewall name)')
+    args = ap.parse_args()
+
+    conv = Converter(args.fwb, args.firewall)
+    rules = conv.run()
+    db = conv.render_db()
+    base = args.output_name or args.firewall
+    with open('%s/%s.rules' % (args.outdir, base), 'w') as f:
+        f.write(rules)
+    with open('%s/%s.db' % (args.outdir, base), 'w') as f:
+        f.write(db)
+    for w in conv.warnings:
+        print('warning: %s' % w, file=sys.stderr)
+    print('wrote %s/%s.rules and %s/%s.db' % (args.outdir, base, args.outdir, base))
+
+
+if __name__ == '__main__':
+    main()

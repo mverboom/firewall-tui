@@ -250,6 +250,7 @@ fwtui/
   dbview.py     custom collapsible db view
   config.py     config file loading
 firewall-tui    launcher script
+fwbuilder2cdist  fwbuilder project -> __firewall rules + db converter (see docs/migration.md)
 init            setup script (creates the venv, installs textual)
 firewall-tui.conf  default configuration
 ```
@@ -272,4 +273,5 @@ firewall-tui.conf  default configuration
   `App.run_test()` (see the command log in the cdist workspace) and by
   validating all production rulesets with `expand.validate_rules`.
 - `docs/design.md` documents the design decisions and history; `docs/format.md`
-  is the format reference the TUI implements.
+  is the format reference the TUI implements; `docs/migration.md` documents
+  converting fwbuilder projects with `fwbuilder2cdist`.
