@@ -88,11 +88,13 @@ entries — without prompting.
    "Interactive reconciliation" above). Several names may already exist in
    the shared db.
 
-3. **Interface objects warn.** A rule whose src/dst references a firewall
-   `Interface` object directly is dropped with "unhandled address object
-   Interface …". Interface restrictions are otherwise kept only when the rule
-   group name matches a firewall interface name (e.g. `Openvpn` → `-i openvpn`).
-   Review the warnings per rule.
+3. **Interface references are resolved to their networks.** A rule whose
+   Src/Dst references a firewall `Interface` object is now mapped to the
+   network(s) that interface serves (e.g. `eth1` → `-d network(eth1)`), and
+   LAN-interface destinations are placed on `FORWARD`. Interface
+   restrictions via a rule group name are still only applied when the group
+   name matches an interface name; a near-miss (e.g. `eth` vs `eth0`) now
+   emits a warning instead of being silently dropped.
 
 4. **DNAT destination IP.** DNAT rules all use the first public firewall IP;
    fwbuilder may have used a different address for specific rules. Adjust per

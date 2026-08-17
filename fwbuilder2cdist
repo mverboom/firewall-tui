@@ -24,7 +24,9 @@ construction (rules are read from the logical Policy/NAT rules, not from
 generated iptables). Deliberate simplifications (reported as warnings):
 
 * Interface restrictions are only kept when the rule group name matches a
-  firewall interface name (e.g. group "Openvpn" -> -i/-o openvpn).
+  firewall interface name (e.g. group "Openvpn" -> -i/-o openvpn); a direct
+  reference to a firewall Interface in a rule's Src/Dst is resolved to the
+  network(s) that interface serves.
 * Inbound rules to the firewall itself do not get -d <firewall ip>.
 * The final "deny all, log" rule becomes policy=drop + log= in [global].
 * The loopback rule becomes the loopback global.
@@ -107,6 +109,7 @@ class Converter:
         self.rules = []      # (table, line, section)
         self.nat = []        # ('nat', line, section)
         self.warnings = []
+        self._warned_groups = set()
         self.log_global = False
 
     # ---------- object helpers ----------
@@ -290,6 +293,16 @@ class Converter:
             return res
         if tag == 'Firewall':
             return [('literal', ip) for ip in self._fw_ips()]
+        if tag == 'Interface':
+            # a reference to a firewall interface means the network(s) it
+            # serves (the subnets on it), not just the firewall's own address
+            ips = self.fw_ifaces.get(name, [])
+            if not ips:
+                self.warnings.append('interface %s has no addresses' % name)
+                return []
+            nets = [cidr(ip, mask) for ip, mask in ips]
+            self.db['networks'][name] = ' '.join(nets)
+            return [('network', name)]
         self.warnings.append('unhandled address object %s %s' % (tag, name))
         return []
 
@@ -347,7 +360,7 @@ class Converter:
                        for ip in self.host_ips.get(value, []))
         if kind == 'network':
             net = self._net_cidr(value)
-            return bool(net) and self._net_in_lan(net) and not self._net_has_fw_ip(net)
+            return bool(net) and self._net_in_lan(net)
         # hostgroup/networkgroup: assume LAN side (conservative)
         return True
 
@@ -369,9 +382,11 @@ class Converter:
         src_lan_net = any(k == 'network' and self._net_in_lan(self._net_cidr(v))
                           for k, v in srcs)
         if direction == 'Inbound':
-            if dst_fw:
-                return ['INPUT']
-            return ['FORWARD'] if dst_int else ['INPUT']
+            # a LAN subnet (even one that contains the firewall's own address)
+            # is forwarded traffic, not traffic to the firewall itself
+            if dst_int:
+                return ['FORWARD']
+            return ['INPUT']
         if direction == 'Outbound':
             if src_int or src_lan_net:
                 return ['FORWARD', 'OUTPUT']
@@ -385,6 +400,19 @@ class Converter:
         for itf in self.fw_ifaces:
             if group.lower() == itf.lower():
                 return itf
+        # near match: the group name looks like an interface but doesn't match
+        # exactly, so the -i/-o restriction would be silently lost
+        gl = group.lower()
+        for itf in self.fw_ifaces:
+            il = itf.lower()
+            if (gl.startswith(il) or il.startswith(gl)
+                    or gl.endswith(il) or il.endswith(gl)) \
+                    and min(len(gl), len(il)) >= 3 \
+                    and group not in self._warned_groups:
+                self._warned_groups.add(group)
+                self.warnings.append(
+                    "group '%s' is close to interface '%s' but does not match; "
+                    "the -i/-o restriction is not applied" % (group, itf))
         return None
 
     def _addr_match(self, kind, value, side, neg):
