@@ -4,10 +4,20 @@
 Usage:
     fwbuilder2cdist --fwb firewall.fwb --firewall Sheppard [--outdir out/]
                      [--output-name sheppard.cnw.verboom.net]
+                     [--existing-db path/db [--apply-db] [--batch]]
 
 Reads a fwbuilder project (XML) and emits, for the named firewall:
     <output-name>.rules   - cdist __firewall rules file
     <output-name>.db      - cdist __firewall database file
+
+With --existing-db, the generated entries are reconciled against the shared
+cdist db instead of being emitted as a standalone db: entries already present
+(exact match) are reused, unambiguous value matches are auto-mapped to the
+existing name, and ambiguous cases (same name different value, or several
+value matches) are resolved interactively (or automatically with --batch).
+The rules file is rewritten to use the mapped names and the genuinely new
+entries are written to <output-name>.new.db (or appended to the existing db
+with --apply-db).
 
 The generated rules are flat: fwbuilder's user chains/jumps are gone by
 construction (rules are read from the logical Policy/NAT rules, not from
@@ -23,6 +33,9 @@ generated iptables). Deliberate simplifications (reported as warnings):
 
 import argparse
 import ipaddress
+import os
+import re
+import shutil
 import sys
 import xml.etree.ElementTree as ET
 
@@ -618,25 +631,321 @@ class Converter:
         return '\n'.join(out)
 
 
+# ---------------------------------------------------------------------------
+# Reconciliation against an existing shared db
+# ---------------------------------------------------------------------------
+
+# section -> the leaf section a group's members reference
+GROUP_LEAF = {'servicegroups': 'services', 'hostgroups': 'hosts',
+              'networkgroups': 'networks'}
+LEAF_SECTIONS = ('services', 'hosts', 'networks')
+ALL_SECTIONS = ('services', 'hosts', 'networks',
+                'servicegroups', 'hostgroups', 'networkgroups')
+
+# function name in rule text -> db section it refers to
+FUNC_SECTION = {
+    'host': 'hosts', 'hosts': 'hosts', 'hostgroup': 'hostgroups',
+    'network': 'networks', 'networkgroup': 'networkgroups',
+    'dservice': 'services', 'service': 'services',
+}
+FUNCRE = re.compile(r'(\w+)\(([^)]*)\)')
+
+
+def parse_db_file(path):
+    """Parse a shared db file into {section: {name: value}}.
+    `@command` values are kept as-is (matched opaquely)."""
+    out = {}
+    section = None
+    with open(path) as fh:
+        for raw in fh:
+            stripped = raw.strip()
+            if not stripped or stripped.startswith('#'):
+                continue
+            if stripped.startswith('[') and stripped.endswith(']'):
+                section = stripped[1:-1].strip()
+                out.setdefault(section, {})
+                continue
+            if '=' in stripped and section is not None:
+                key, val = stripped.split('=', 1)
+                out[section][key.strip()] = val.strip()
+    return out
+
+
+def value_sig(section, value):
+    """Normalize a db value for equality matching. Host/network IP lists and
+    group member lists are order-insensitive; services compare as-is."""
+    if section in ('hosts', 'networks'):
+        return frozenset(value.split())
+    if section in ('servicegroups', 'hostgroups', 'networkgroups'):
+        return frozenset(value.split(','))
+    return value
+
+
+def _ask(prompt, options, default, batch):
+    """Interactive single-choice prompt; auto-returns default in batch/non-tty.
+    options: list of (key, label)."""
+    if batch or not sys.stdin.isatty():
+        return default
+    while True:
+        sys.stderr.write(prompt + '\n')
+        for k, label in options:
+            sys.stderr.write('  [%s] %s\n' % (k, label))
+        try:
+            choice = input('  choice [%s]: ' % default).strip().lower() or default
+        except (EOFError, KeyboardInterrupt):
+            return default
+        if choice in [k for k, _ in options]:
+            return choice
+
+
+def _ask_new_name(section, old, batch):
+    if batch:
+        return None
+    while True:
+        try:
+            n = input('  new name for [%s] %s (blank to skip): ' % (section, old)).strip()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        return n or None
+
+
+def _resolve_conflict(section, name, gv, ev, batch):
+    options = [
+        ('e', 'keep existing (rules use the existing value; generated dropped)'),
+        ('n', 'add generated as a new entry (choose a new name)'),
+        ('s', 'skip (leave the generated entry out entirely)'),
+    ]
+    c = _ask("[%s] '%s' already exists as '%s', but the project has '%s'"
+             % (section, name, ev, gv), options, 'e', batch)
+    if c == 'e':
+        return 'keep', None
+    if c == 's':
+        return 'skip', None
+    return 'new', _ask_new_name(section, name, batch)
+
+
+def _resolve_multiple(section, name, gv, matches, batch):
+    options = [('%d' % (i + 1), 'map to existing %s' % m)
+               for i, m in enumerate(matches)]
+    options += [('n', 'add as a new entry (keep the generated name)'),
+                ('s', 'skip')]
+    c = _ask("[%s] '%s' (%s) matches %d existing entries: %s"
+             % (section, name, gv, len(matches), ', '.join(matches)),
+             options, '1', batch)
+    if c == 'n':
+        return 'new', None
+    if c == 's':
+        return 'skip', None
+    return 'map', matches[int(c) - 1]
+
+
+def _reconcile_section(sec, generated, existing, mapping, merge_add, report, batch):
+    ex = existing.get(sec, {})
+    leaf = GROUP_LEAF.get(sec)  # None for leaves
+    for name, value in generated.get(sec, {}).items():
+        members = value.split(',')
+        eff = [mapping.get((leaf, m), m) for m in members] if leaf else members
+        eff_value = ','.join(eff)
+        sig = value_sig(sec, eff_value)
+        if name in ex and (ex[name].startswith('@')
+                           or value_sig(sec, ex[name]) != sig):
+            decision, newname = _resolve_conflict(sec, name, eff_value, ex[name], batch)
+            if decision == 'keep':
+                report.append("[%s] %s: kept existing '%s'" % (sec, name, ex[name]))
+            elif decision == 'new' and newname:
+                mapping[(sec, name)] = newname
+                merge_add[(sec, newname)] = eff_value
+                report.append("[%s] %s: added as new '%s'" % (sec, name, newname))
+            else:
+                report.append("[%s] %s: skipped" % (sec, name))
+        elif name in ex:
+            report.append("[%s] %s: exact match, reused" % (sec, name))
+        else:
+            matches = [en for en, ev in ex.items()
+                       if not ev.startswith('@') and value_sig(sec, ev) == sig]
+            if not matches:
+                merge_add[(sec, name)] = eff_value
+                report.append("[%s] %s: new entry to merge" % (sec, name))
+            elif len(matches) == 1:
+                mapping[(sec, name)] = matches[0]
+                report.append("[%s] %s -> existing %s" % (sec, name, matches[0]))
+            else:
+                decision, mapped = _resolve_multiple(sec, name, eff_value, matches, batch)
+                if decision == 'map':
+                    mapping[(sec, name)] = mapped
+                    report.append("[%s] %s -> existing %s" % (sec, name, mapped))
+                elif decision == 'new':
+                    merge_add[(sec, name)] = eff_value
+                    report.append("[%s] %s: added as new" % (sec, name))
+                else:
+                    report.append("[%s] %s: skipped" % (sec, name))
+
+
+def reconcile(generated, existing, batch=False):
+    """Diff the generated db against the shared db, resolving a name mapping
+    and the set of entries to merge. Returns (mapping, merge_add, report).
+    mapping: {(section, old_name): new_name}; merge_add: {(section, name): value}."""
+    mapping = {}
+    merge_add = {}
+    report = []
+    for sec in LEAF_SECTIONS:
+        _reconcile_section(sec, generated, existing, mapping, merge_add, report, batch)
+    for sec in ('servicegroups', 'hostgroups', 'networkgroups'):
+        _reconcile_section(sec, generated, existing, mapping, merge_add, report, batch)
+    return mapping, merge_add, report
+
+
+# ---------------------------------------------------------------------------
+# Rewriting rules + group values to the mapped names
+# ---------------------------------------------------------------------------
+
+def rewrite_rule_text(text, mapping):
+    """Rewrite db-name references in rule text to their mapped names."""
+    if not mapping:
+        return text
+
+    def repl(m):
+        fn, args = m.group(1), m.group(2)
+        if fn == 'dservices':
+            if ('servicegroups', args) in mapping:
+                return 'dservices(%s)' % mapping[('servicegroups', args)]
+            return 'dservices(%s)' % ','.join(
+                mapping.get(('services', s), s) for s in args.split(','))
+        sec = FUNC_SECTION.get(fn)
+        if sec is None:
+            return m.group(0)
+        if fn == 'hosts':
+            return 'hosts(%s)' % ','.join(
+                mapping.get(('hosts', h), h) for h in args.split(','))
+        return '%s(%s)' % (fn, mapping.get((sec, args), args))
+
+    return FUNCRE.sub(repl, text)
+
+
+def rewrite_rules_text(text, mapping):
+    """Rewrite only the rule lines of a rendered rules file."""
+    if not mapping:
+        return text
+    out = []
+    for line in text.splitlines():
+        if re.match(r'^(filter|nat|mangle)\d*=([^=]|\S)', line):
+            key, val = line.split('=', 1)
+            out.append('%s=%s' % (key, rewrite_rule_text(val, mapping)))
+        else:
+            out.append(line)
+    return '\n'.join(out) + '\n'
+
+
+def render_merge(merge_add):
+    """Render the entries to merge into a db fragment."""
+    out = []
+    for section in ALL_SECTIONS:
+        items = {k: v for (s, k), v in merge_add.items() if s == section}
+        if not items:
+            continue
+        out.append('[%s]' % section)
+        for k in sorted(items):
+            out.append('%s=%s' % (k, items[k]))
+        out.append('')
+    return '\n'.join(out)
+
+
+def apply_db(existing_path, merge_add, backup=True):
+    """Append the merge entries into the shared db under their sections.
+    Existing sections get the entries appended; missing sections are created.
+    Writes a .bak copy first."""
+    if backup:
+        shutil.copy(existing_path, existing_path + '.bak')
+    sections = {s: {k: v for (sec, k), v in merge_add.items() if sec == s}
+                for s in ALL_SECTIONS}
+    pending = {s: sorted(names) for s, names in sections.items() if names}
+    emitted = set()
+    out = []
+    section = None
+    with open(existing_path) as fh:
+        for raw in fh:
+            line = raw.rstrip('\n')
+            out.append(line)
+            stripped = line.strip()
+            if stripped.startswith('[') and stripped.endswith(']'):
+                section = stripped[1:-1].strip()
+                if section in pending:
+                    for k in pending[section]:
+                        out.append('%s=%s' % (k, sections[section][k]))
+                    emitted.add(section)
+    for s in ALL_SECTIONS:
+        if s in pending and s not in emitted:
+            out.append('')
+            out.append('[%s]' % s)
+            for k in pending[s]:
+                out.append('%s=%s' % (k, sections[s][k]))
+    with open(existing_path, 'w') as fh:
+        fh.write('\n'.join(out) + '\n')
+
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--fwb', required=True, help='fwbuilder project file (XML)')
     ap.add_argument('--firewall', required=True, help='firewall name in the project')
     ap.add_argument('--outdir', default='.', help='output directory')
     ap.add_argument('--output-name', help='base name for output files (default: firewall name)')
+    ap.add_argument('--existing-db', help='shared db to reconcile generated entries against')
+    ap.add_argument('--apply-db', action='store_true',
+                    help='append the new entries into --existing-db (backup first)')
+    ap.add_argument('--batch', action='store_true',
+                    help='non-interactive: auto-accept defaults for ambiguous entries')
     args = ap.parse_args()
+
+    existing_db = None
+    if args.existing_db:
+        existing_db = parse_db_file(args.existing_db)
 
     conv = Converter(args.fwb, args.firewall)
     rules = conv.run()
     db = conv.render_db()
     base = args.output_name or args.firewall
-    with open('%s/%s.rules' % (args.outdir, base), 'w') as f:
+
+    mapping = {}
+    merge_add = {}
+    if existing_db is not None:
+        mapping, merge_add, report = reconcile(conv.db, existing_db,
+                                               batch=args.batch)
+        rules = rewrite_rules_text(rules, mapping)
+
+    rules_path = '%s/%s.rules' % (args.outdir, base)
+    with open(rules_path, 'w') as f:
         f.write(rules)
-    with open('%s/%s.db' % (args.outdir, base), 'w') as f:
-        f.write(db)
+
+    if existing_db is not None:
+        newdb_path = '%s/%s.new.db' % (args.outdir, base)
+        newdb = render_merge(merge_add)
+        with open(newdb_path, 'w') as f:
+            f.write(newdb)
+        print('\nReconciliation report:')
+        for r in report:
+            print('  ' + r)
+        if merge_add:
+            print('wrote %s (%d new entries)' % (newdb_path, len(merge_add)))
+        else:
+            print('nothing new to merge (all generated entries already in %s)'
+                  % args.existing_db)
+        if args.apply_db:
+            if merge_add:
+                apply_db(args.existing_db, merge_add)
+                print('appended new entries to %s (backup at %s.bak)'
+                      % (args.existing_db, args.existing_db))
+            else:
+                print('no changes applied to %s' % args.existing_db)
+        print('wrote %s (names mapped to the shared db)' % rules_path)
+    else:
+        db_path = '%s/%s.db' % (args.outdir, base)
+        with open(db_path, 'w') as f:
+            f.write(db)
+        print('wrote %s and %s' % (rules_path, db_path))
+
     for w in conv.warnings:
         print('warning: %s' % w, file=sys.stderr)
-    print('wrote %s/%s.rules and %s/%s.db' % (args.outdir, base, args.outdir, base))
 
 
 if __name__ == '__main__':

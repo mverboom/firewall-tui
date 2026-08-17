@@ -12,14 +12,47 @@ cleanly and deploy through the `__firewall` manifest.
 
 ```
 fwbuilder2cdist --fwb firewall.fwb --firewall Sheppard \
-                [--outdir out/] [--output-name sheppard.cnw.verboom.net]
+                [--outdir out/] [--output-name sheppard.cnw.verboom.net] \
+                [--existing-db path/db [--apply-db] [--batch]]
 ```
 
 - `--fwb`      the fwbuilder project file (XML).
 - `--firewall` the firewall name as it appears in the project.
 - `--output-name` base name for the output files (defaults to the firewall
   name). `--outdir` defaults to the current directory.
-- Writes `<name>.rules` and `<name>.db`, prints warnings to stderr.
+- `--existing-db` reconcile the generated entries against the shared cdist
+  db instead of writing a standalone `<name>.db` (see below).
+- `--apply-db` append the genuinely new entries into `--existing-db`
+  (a `.bak` copy is written first).
+- `--batch`    non-interactive: auto-accept the safe default for any
+  ambiguous entry (used automatically when stdin is not a terminal).
+
+Without `--existing-db` it writes `<name>.rules` + `<name>.db`. With
+`--existing-db` it writes `<name>.rules` (names rewritten to the shared db)
+and `<name>.new.db` (the entries to merge), plus a reconciliation report.
+
+## Interactive reconciliation against the shared db
+
+Production uses one shared `…/firewall/db`, so migrated entries have to be
+matched to what's already there. With `--existing-db`, every generated
+service/host/network/group is classified against the shared db:
+
+- **exact match** (same name + same value) — reused, no action;
+- **same value, different name** — auto-mapped to the existing name (rules
+  are rewritten to use it), keeping the shared db canonical;
+- **same name, different value** — genuine conflict: prompts whether to keep
+  the existing value, add the generated one under a new name, or skip;
+- **several value matches** — prompts which existing entry to map to;
+- **new** — kept and written to `<name>.new.db` to merge.
+
+Group members are matched after their referenced leaves are mapped, so e.g.
+`hostgroup(lanclients)` whose members are re-merged onto existing hosts maps
+onto an existing `[hostgroups]` entry by value. Rules (and group definitions)
+are rewritten to the final names via `host()`/`dservice()`/`hostgroup()`/etc.
+
+`--batch` (or a non-terminal stdin) applies the safe defaults — keep existing
+on a same-name conflict, map on an unambiguous value match, add genuinely new
+entries — without prompting.
 
 ## What it maps
 
@@ -48,10 +81,12 @@ fwbuilder2cdist --fwb firewall.fwb --firewall Sheppard \
    defined"). Check the generated `[global]` `proto` line; if the firewall
    has no IPv6 policy, set `proto=4`.
 
-2. **The db is standalone.** The converter writes a self-contained
-   `<name>.db`, but production uses the shared `…/firewall/db`. Merge the
-   generated `[services]/[hosts]/[networks]/…` entries into the shared db
-   before deploying. Several names may already exist there.
+2. **The db is standalone (unless `--existing-db`).** Without it, the
+   converter writes a self-contained `<name>.db`, but production uses the
+   shared `…/firewall/db`. Pass `--existing-db` to reconcile against and
+   optionally `--apply-db` to merge the new entries directly (see
+   "Interactive reconciliation" above). Several names may already exist in
+   the shared db.
 
 3. **Interface objects warn.** A rule whose src/dst references a firewall
    `Interface` object directly is dropped with "unhandled address object
