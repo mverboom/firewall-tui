@@ -5,6 +5,8 @@ Usage:
     fwbuilder2cdist --fwb firewall.fwb --firewall Sheppard [--outdir out/]
                      [--output-name sheppard.cnw.verboom.net]
                      [--existing-db path/db [--apply-db] [--batch]]
+                     [--policy accept|drop] [--proto 4|6|4,6]
+                     [--established true|false] [--icmp true|false]
 
 Reads a fwbuilder project (XML) and emits, for the named firewall:
     <output-name>.rules   - cdist __firewall rules file
@@ -29,8 +31,13 @@ generated iptables). Deliberate simplifications (reported as warnings):
   network(s) that interface serves.
 * Inbound rules to the firewall itself do not get -d <firewall ip>.
 * The final "deny all, log" rule becomes policy=drop + log= in [global].
-* The loopback rule becomes the loopback global.
-* DNAT rules use the first public firewall IP as destination.
+* Loopback rules are converted as normal rules and the implicit loopback
+  global is disabled.
+* DNAT rules use the rule's own public destination IP when present, else the
+  first public firewall IP.
+* SNAT rules use the fwbuilder translate-to (TSrc) address when present, else
+  a LAN/public heuristic.
+* mangle rules are not converted (a warning is emitted).
 """
 
 import argparse
@@ -92,7 +99,8 @@ class ServiceRegistry:
 
 
 class Converter:
-    def __init__(self, fwb, fw_name):
+    def __init__(self, fwb, fw_name, policy='drop', proto='4,6',
+                 established=True, icmp=None):
         self.tree = ET.parse(fwb)
         self.root = self.tree.getroot()
         self.objects = {el.get('id'): el for el in self.root.iter() if el.get('id')}
@@ -100,6 +108,10 @@ class Converter:
         if self.fw is None:
             sys.exit("error: firewall '%s' not found in project" % fw_name)
         self.fw_name = fw_name
+        self.policy = policy
+        self.proto = proto
+        self.established = established
+        self.icmp = icmp
         self.fw_ifaces = self._fw_interfaces()   # {name: [(ip, netmask), ...]}
         self.lan_subnets = self._lan_subnets()
         self.host_ips = {}   # host name -> [ip, ...]
@@ -110,6 +122,8 @@ class Converter:
         self.nat = []        # ('nat', line, section)
         self.warnings = []
         self._warned_groups = set()
+        self._warned_both = set()
+        self.loopback_rules = False
         self.log_global = False
 
     # ---------- object helpers ----------
@@ -312,6 +326,14 @@ class Converter:
             res.extend(self._resolve_addr(ref))
         return res
 
+    def _port_range(self, o):
+        """Return a service's port as 'start' or 'start:end' (a range)."""
+        start = o.get('dst_range_start')
+        end = o.get('dst_range_end')
+        if end and end != start:
+            return '%s:%s' % (start, end)
+        return start
+
     def _resolve_service(self, ref):
         """Return list of (kind, ...) for a service ref.
         kind: port (proto, port, name) or icmp (type, name)."""
@@ -324,11 +346,11 @@ class Converter:
         if tag == 'AnyIPService':
             return []
         if tag == 'TCPService':
-            self.svc.add_port(name, 'tcp', o.get('dst_range_start'))
-            return [('port', 'tcp', o.get('dst_range_start'), name)]
+            self.svc.add_port(name, 'tcp', self._port_range(o))
+            return [('port', 'tcp', self._port_range(o), name)]
         if tag == 'UDPService':
-            self.svc.add_port(name, 'udp', o.get('dst_range_start'))
-            return [('port', 'udp', o.get('dst_range_start'), name)]
+            self.svc.add_port(name, 'udp', self._port_range(o))
+            return [('port', 'udp', self._port_range(o), name)]
         if tag in ('ICMPService', 'ICMP6Service'):
             self.svc.add_icmp(name, o.get('type'))
             return [('icmp', o.get('type'), name)]
@@ -423,10 +445,10 @@ class Converter:
             return '%s-%s network(%s)' % (bang, side, value)
         if kind == 'literal':
             return '%s-%s %s' % (bang, side, value)
-        if kind == 'hostgroup':
-            return 'hostgroup(%s) %s' % (value, '!%s' % side if neg else side)
-        if kind == 'networkgroup':
-            return 'networkgroup(%s) %s' % (value, '!%s' % side if neg else side)
+        if kind in ('hostgroup', 'networkgroup'):
+            # the set match takes src/dst (not s/d) as its direction flag
+            flag = 'src' if side == 's' else 'dst'
+            return '%s(%s) %s%s' % (kind, value, '!' if neg else '', flag)
         return ''
 
     def _service_variants(self, srvs):
@@ -445,10 +467,14 @@ class Converter:
                 icmps.append(name)
         variants = []
         for proto, svcs in byproto.items():
-            if len(svcs) == 1:
-                variants.append(['dservice(%s)' % svcs[0][0]])
-            else:
-                variants.append(['dservices(%s)' % ','.join(s[0] for s in svcs)])
+            # chunk into <=15 ports (the manifest's multiport limit); each
+            # chunk becomes its own rule line (OR semantics preserved)
+            for i in range(0, len(svcs), 15):
+                chunk = svcs[i:i + 15]
+                if len(chunk) == 1:
+                    variants.append(['dservice(%s)' % chunk[0][0]])
+                else:
+                    variants.append(['dservices(%s)' % ','.join(s[0] for s in chunk)])
         if icmps:
             variants.append(['dservice(%s)' % n for n in icmps])
         return variants or [[]]
@@ -456,7 +482,13 @@ class Converter:
     def _gen_policy(self):
         for pol in self.fw.iter(NS + 'Policy'):
             pname = pol.get('name') or ''
-            table = 'filter6' if 'ipv6' in pname.lower() else 'filter'
+            pl = pname.lower()
+            # IPv6 policy detection: fwbuilder names it e.g. "Policy IPv6"
+            # or "Policy6"; anything else is treated as IPv4
+            if 'ipv6' in pl or 'v6' in pl or pl.rstrip().endswith('6'):
+                table = 'filter6'
+            else:
+                table = 'filter'
             for rule in pol.iter(NS + 'PolicyRule'):
                 if rule.get('disabled') == 'True':
                     continue
@@ -470,16 +502,29 @@ class Converter:
                     if log:
                         self.log_global = True
                     continue
-                # loopback rule -> handled by the loopback global
-                if group.lower() == 'loopback':
-                    continue
+                # loopback rules are converted as normal rules (with -i/-o lo)
+                # and the implicit loopback global is disabled
+                is_loopback = group.lower() == 'loopback'
+                if is_loopback:
+                    self.loopback_rules = True
+                    iface = 'lo'
+                else:
+                    iface = self._iface_for_group(group)
+                if direction == 'Both' and group not in self._warned_both:
+                    self._warned_both.add(group)
+                    self.warnings.append(
+                        "rule in group '%s' has direction 'Both'; emitted in "
+                        "INPUT, OUTPUT and FORWARD (review)" % group)
                 srcs = self._resolve_addrs(rule, 'Src')
                 dsts = self._resolve_addrs(rule, 'Dst')
                 srvs = self._resolve_services(rule, 'Srv')
                 chains = self._chains(direction, srcs, dsts)
-                iface = self._iface_for_group(group)
                 neg_src = self._negated(rule, 'Src')
                 neg_dst = self._negated(rule, 'Dst')
+                # reject(reset) is only valid for TCP; use unreachable otherwise
+                reject_type = ('reset' if srvs and all(
+                    s[0] == 'port' and s[1] == 'tcp' for s in srvs)
+                    else 'unreachable')
                 for chain in chains:
                     for variant in self._service_variants(srvs):
                         parts = ['-A %s' % chain]
@@ -498,7 +543,7 @@ class Converter:
                         elif action == 'Deny':
                             parts.append('-j DROP')
                         elif action == 'Reject':
-                            parts.append('reject(reset)')
+                            parts.append('reject(%s)' % reject_type)
                         if log:
                             parts.append('log(%s)' % group)
                         self.rules.append((table, ' '.join(parts), group))
@@ -531,20 +576,65 @@ class Converter:
             dst = self.host_ips.get(value, [None])[0] or value
         elif kind == 'literal':
             dst = value
+        elif kind == 'network':
+            net = self._net_cidr(value)
+            if net:
+                try:
+                    dst = str(ipaddress.ip_network(net.split()[0], strict=False)
+                              .network_address)
+                except ValueError:
+                    dst = value
+            else:
+                dst = value
+            self.warnings.append(
+                'DNAT target is a network (%s); using its first address %s'
+                % (value, dst))
         else:
+            self.warnings.append(
+                'DNAT target is a group (%s); using its name as the address '
+                '(review)' % value)
             dst = value
         tport = None
         for s in tsrv:
             if s[0] == 'port':
                 tport = s[2]
-        if tport:
+        if tport and ':' not in tport:
             oport = None
             for s in osrv:
                 if s[0] == 'port':
                     oport = s[2]
-            if tport != oport:
+            if oport and ':' not in oport and tport != oport:
                 dst = '%s:%s' % (dst, tport)
         return dst
+
+    def _nat_snat_target(self, tsrc):
+        """Resolve a SNAT translate-to (TSrc) to an IP, or None."""
+        for kind, value in tsrc:
+            if kind == 'host':
+                return self.host_ips.get(value, [None])[0] or value
+            if kind == 'literal':
+                return value
+            if kind == 'network':
+                net = self._net_cidr(value)
+                if net:
+                    try:
+                        return str(ipaddress.ip_network(net.split()[0], strict=False)
+                                   .network_address)
+                    except ValueError:
+                        pass
+        return None
+
+    def _nat_dnat_dest(self, odst, wan):
+        """The public destination IP for a DNAT rule: the rule's own public
+        literal destination if present, else the firewall's first public IP."""
+        for kind, value in odst:
+            if kind == 'literal':
+                try:
+                    if not ipaddress.ip_address(value).is_private:
+                        return value
+                except ValueError:
+                    pass
+        return wan
 
     def _nat_snat_source(self, odst, wan, lan):
         # traffic to a private/LAN destination is SNAT'd to the LAN address,
@@ -571,11 +661,12 @@ class Converter:
                 tdst = self._resolve_addrs(rule, 'TDst')
                 tsrv = self._resolve_services(rule, 'TSrv')
                 if tdst:
-                    # DNAT
+                    # DNAT: use the rule's own public destination IP if given
+                    dst_ip = self._nat_dnat_dest(odst, wan)
                     for sm in self._nat_service_match(osrv) or ['']:
                         parts = ['-A PREROUTING']
-                        if wan:
-                            parts.append('-d %s' % wan)
+                        if dst_ip:
+                            parts.append('-d %s' % dst_ip)
                         for kind, value in osrc:
                             parts.append(self._addr_match(kind, value, 's', False))
                         if sm:
@@ -596,8 +687,13 @@ class Converter:
                                 parts.append('-j SNAT --to-source %s' % lan)
                             self.nat.append(('nat', ' '.join(parts), group))
                 else:
-                    # SNAT (tsrc set or translate to outgoing interface address)
-                    src = self._nat_snat_source(odst, wan, lan)
+                    # SNAT: prefer the fwbuilder translate-to (TSrc) address
+                    tsrc_ip = self._nat_snat_target(tsrc)
+                    src = tsrc_ip or self._nat_snat_source(odst, wan, lan)
+                    if tsrc and not tsrc_ip:
+                        self.warnings.append(
+                            'SNAT rule in group %s: could not resolve the '
+                            'translate-to address; using %s' % (group, src))
                     for sm in self._nat_service_match(osrv) or ['']:
                         parts = ['-A POSTROUTING']
                         for kind, value in osrc:
@@ -623,6 +719,15 @@ class Converter:
                 if rule.get('disabled') != 'True':
                     self._resolve_services(rule, 'OSrv')
                     self._resolve_services(rule, 'TSrv')
+        # mangle rules are not converted; surface them so they are not silently
+        # dropped
+        for mangle in self.fw.iter(NS + 'Mangle'):
+            n = len(list(mangle.iter(NS + 'MangleRule')))
+            if n:
+                self.warnings.append(
+                    'firewall has %d mangle rule(s); mangle is not converted '
+                    '(review manually)' % n)
+                break
         self.svc.finalize()
         self._gen_policy()
         self._gen_nat()
@@ -630,7 +735,13 @@ class Converter:
         return self._render()
 
     def _render(self):
-        out = ['[global]', 'policy=drop', 'established=true', 'proto=4,6']
+        out = ['[global]', 'policy=%s' % self.policy,
+               'established=%s' % ('true' if self.established else 'false'),
+               'proto=%s' % self.proto]
+        if self.loopback_rules:
+            out.append('loopback=false')
+        if self.icmp is not None:
+            out.append('icmp=%s' % self.icmp)
         if self.log_global:
             out.append('log=Unmatched traffic')
         allrules = self.rules + self.nat
@@ -638,6 +749,17 @@ class Converter:
         for _, _, section in allrules:
             if section not in sections:
                 sections.append(section)
+        seen = set()
+        for section in sections:
+            # the manifest normalizes spaces to underscores, so two groups
+            # that differ only by a space can collide into one section
+            norm = section.replace(' ', '_')
+            if norm in seen:
+                self.warnings.append(
+                    'section/group name "%s" collides with another after the '
+                    'manifest normalizes spaces to underscores; the manifest '
+                    'will error (Section redefined)' % section)
+            seen.add(norm)
         for section in sections:
             out.append('')
             out.append('[%s]' % section)
@@ -923,13 +1045,23 @@ def main():
                     help='append the new entries into --existing-db (backup first)')
     ap.add_argument('--batch', action='store_true',
                     help='non-interactive: auto-accept defaults for ambiguous entries')
+    ap.add_argument('--policy', choices=('accept', 'drop'), default='drop',
+                    help='default policy for the generated ruleset (default: drop)')
+    ap.add_argument('--proto', default='4,6',
+                    help='IP versions to generate rules for: 4, 6 or 4,6 (default: 4,6)')
+    ap.add_argument('--established', choices=('true', 'false'), default='true',
+                    help='allow related/established traffic (default: true)')
+    ap.add_argument('--icmp', choices=('true', 'false'),
+                    help='allow icmp at the bottom of the ruleset (default: rely on explicit rules)')
     args = ap.parse_args()
 
     existing_db = None
     if args.existing_db:
         existing_db = parse_db_file(args.existing_db)
 
-    conv = Converter(args.fwb, args.firewall)
+    conv = Converter(args.fwb, args.firewall, policy=args.policy,
+                     proto=args.proto, established=(args.established == 'true'),
+                     icmp=args.icmp)
     rules = conv.run()
     db = conv.render_db()
     base = args.output_name or args.firewall
