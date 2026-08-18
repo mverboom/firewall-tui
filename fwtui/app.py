@@ -2773,9 +2773,9 @@ class FirewallApp(App):
     .src-type { width: 13; }
     .src-val, .src-custom { width: 1fr; }
     #rawcol TextArea { height: 1fr; }
-    #modal-buttons { height: 3; align-horizontal: left; align-vertical: middle; padding: 0 1; }
-    #modal-buttons Button { margin: 0 1 0 0; background: $panel; color: white; height: 2; padding: 0 2; }
-    .picker-add { margin: 0 1; background: $panel; color: white; height: 2; padding: 0 2; }
+    #modal-buttons { height: 2; align-horizontal: left; align-vertical: middle; padding: 0 1; }
+    #modal-buttons Button { margin: 0 1 0 0; background: $panel; color: white; height: 1; padding: 0 2; }
+    .picker-add { margin: 0 1; background: $panel; color: white; height: 1; padding: 0 2; }
     .modal-title { padding: 1; text-style: bold; }
     #report { height: 20; }
     """
