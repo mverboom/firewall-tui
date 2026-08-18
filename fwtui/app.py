@@ -360,10 +360,8 @@ class RuleEditor(ModalScreen):
         Binding("escape", "cancel", "Cancel"),
         Binding("ctrl+s", "save", "Save"),
         Binding("s", "save", "Save", show=False),
-        # 'a' works when the dropdown is closed; 'ctrl+n' (non-printable)
-        # also works while a dropdown is open, where type-to-search swallows
-        # printable keys like 'a'.
-        Binding("a", "add_db_entry", "Add db entry", show=False),
+        # 'ctrl+n' (non-printable) works even while a dropdown is open,
+        # where type-to-search swallows printable keys.
         Binding("ctrl+n", "add_db_entry", "New db entry"),
         Binding("w", "where_used", "Where used"),
         Binding("up", "prev_field", "Prev field", show=False),
@@ -1030,7 +1028,7 @@ class RuleEditor(ModalScreen):
 
     # -- add a db entry without leaving the editor --------------------------
     def action_add_db_entry(self) -> None:
-        """a: add a db entry without leaving the rule editor. When the
+        """ctrl+n: add a db entry without leaving the rule editor. When the
         focused field is a db reference (source/destination host/network/
         group, service, NAT to-host/to-svc) the structured editor for that
         section opens; otherwise fall back to a raw section:key=value
@@ -2706,7 +2704,7 @@ class FirewallApp(App):
     """
 
     BINDINGS = [
-        Binding("a", "add", "Add"),
+        Binding("ctrl+n", "add", "New"),
         Binding("e", "edit", "Edit"),
         Binding("d", "delete", "Delete"),
         Binding("w", "where_used", "Where used"),
@@ -3364,14 +3362,14 @@ class FirewallApp(App):
         elif tab == "global":
             # no new global settings: the Global tab always shows every
             # option (with its default) and only supports editing ('e')
-            self.notify("'a' isn't available here; the Global tab shows every "
-                        "setting, edit one with 'e'", severity="warning")
+            self.notify("'ctrl+n' isn't available here; the Global tab shows "
+                        "every setting, edit one with 'e'", severity="warning")
 
     def _add_rule(self) -> None:
         rk, info = self._selected_row()
         if info and info[0] == "include":
-            # an include is a container of sections: 'a' adds a section to
-            # the include file itself
+            # an include is a container of sections: 'ctrl+n' adds a section
+            # to the include file itself
             self._add_include_section(info[1])
             return
         section = None
@@ -3555,7 +3553,7 @@ class FirewallApp(App):
 
     # -- include bars ------------------------------------------------------
     # [#name] bars behave like sections: rename (e), delete (d), reorder
-    # (ctrl+up/down), and 'a' adds a section into the include file. The
+    # (ctrl+up/down), and 'ctrl+n' adds a section into the include file. The
     # include content is shared across hosts, so deleting/renaming only
     # changes the host's reference (and what this host includes) — the
     # shared include file is left untouched (not rewritten on save).
@@ -4466,8 +4464,8 @@ class FirewallApp(App):
         return super().check_action(action, parameters)
 
     def _can_add_rule(self) -> bool:
-        """True when 'a' has a real section to add to: a rule/section/include
-        is selected, or a real section is visible in the active tab."""
+        """True when 'ctrl+n' has a real section to add to: a rule/section/
+        include is selected, or a real section is visible in the active tab."""
         rk, info = self._selected_row()
         if info and info[0] in ("rule", "section", "include"):
             return True
