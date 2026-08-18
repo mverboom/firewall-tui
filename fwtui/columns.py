@@ -16,7 +16,7 @@ import re
 
 from .expand import Db
 
-COLUMNS = ("chain", "from", "sport", "to", "proto", "port",
+COLUMNS = ("chain", "source", "sport", "dest", "dport", "proto",
            "match", "action", "target")
 
 
@@ -47,15 +47,15 @@ def rule_columns(text: str, db: Db) -> dict:
     # source/destination via ipset set matches
     m = re.search(r"(?:hostgroup|networkgroup|dns)\(([^)]+)\)\s+src", text)
     if m:
-        cols["from"] = m.group(1)
+        cols["source"] = m.group(1)
     m = re.search(r"(?:hostgroup|networkgroup|dns)\(([^)]+)\)\s+dst", text)
     if m:
-        cols["to"] = m.group(1)
+        cols["dest"] = m.group(1)
 
     # source / source port
     m = re.search(r"-s\s+(\S+)", text)
     if m:
-        cols["from"] = _shorten(m.group(1))
+        cols["source"] = _shorten(m.group(1))
     m = re.search(r"--sport\s+(\S+)", text)
     if m:
         cols["sport"] = m.group(1)
@@ -63,21 +63,21 @@ def rule_columns(text: str, db: Db) -> dict:
     # destination
     m = re.search(r"-d\s+(\S+)", text)
     if m:
-        cols["to"] = _shorten(m.group(1))
+        cols["dest"] = _shorten(m.group(1))
     m = re.search(r"--destination\s+(\S+)", text)
     if m:
-        cols["to"] = _shorten(m.group(1))
+        cols["dest"] = _shorten(m.group(1))
 
     # protocol
     m = re.search(r"-p\s+(\S+)", text)
     if m:
         cols["proto"] = m.group(1)
 
-    # dservice -> proto from db; port column shows the service name
+    # dservice -> proto from db; dport column shows the service name
     m = re.search(r"dservice\(([^)]+)\)", text)
     if m:
         svc = m.group(1)
-        cols["port"] = svc
+        cols["dport"] = svc
         val = db.services.get(svc)
         if val:
             if val.startswith("icmp"):
@@ -88,12 +88,12 @@ def rule_columns(text: str, db: Db) -> dict:
     # dservices (multiport)
     m = re.search(r"dservices\(([^)]+)\)", text)
     if m:
-        cols["port"] = m.group(1)
+        cols["dport"] = m.group(1)
 
     # explicit --dport
     m = re.search(r"--dport\s+(\S+)", text)
     if m:
-        cols["port"] = m.group(1)
+        cols["dport"] = m.group(1)
 
     # match clauses: limit/state/time/recent (shown combined in 'match')
     match = []

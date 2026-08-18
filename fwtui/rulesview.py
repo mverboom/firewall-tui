@@ -33,11 +33,19 @@ from textual.strip import Strip
 
 from .scrollview import NAV_BINDINGS, ScrollView
 
-COLUMNS = ("chain", "from", "sport", "to", "proto", "port",
+COLUMNS = ("chain", "source", "sport", "dest", "dport", "proto",
            "match", "action", "target")
 # chain is 11 so "postrouting" (11 chars) is not truncated; every column is
 # joined with a space in the render so values never run together
-COL_WIDTHS = (11, 22, 6, 22, 6, 12, 12, 10, 20)
+COL_WIDTHS = (11, 22, 6, 22, 12, 6, 12, 10, 20)
+
+# Display labels for the header (capitalised, and friendlier than the raw
+# column keys: source/dest/dport).
+HEADER_LABELS = {
+    "chain": "Chain", "source": "Source", "sport": "Sport",
+    "dest": "Dest", "dport": "Dport", "proto": "Proto",
+    "match": "Match", "action": "Action", "target": "Target",
+}
 
 SECTION_FG = "#a9b1d6"
 SECTION_BG = "#2a2f45"
@@ -52,7 +60,7 @@ def header_text(widths: list[int] | None = None) -> str:
     widths = widths or COL_WIDTHS
     # joined with a space so columns always have a gap, even when a value
     # exactly fills its column width (e.g. "postrouting" = 10 in a 10-wide col)
-    return " ".join(c.ljust(w) for c, w in zip(COLUMNS, widths))
+    return " ".join(HEADER_LABELS[c].ljust(w) for c, w in zip(COLUMNS, widths))
 
 
 class RulesView(ScrollView):

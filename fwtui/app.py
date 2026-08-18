@@ -41,6 +41,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen, Screen
+from textual.css.query import NoMatches
 from textual.widgets import (
     Button, DataTable, Footer, Header, Input, Label, ListItem, ListView,
     Select, Static, TabbedContent, TabPane, TextArea,
@@ -191,18 +192,18 @@ class NavDataTable(DataTable):
 
 
 class HelpFooter(Footer):
-    """Footer that always pins a '?' Help key on the right edge, so the way
+    """Footer that always pins an F1 Help key on the right edge, so the way
     to open the key-binding help is never scrolled out of view even when the
     other keys overflow a narrow terminal."""
 
     def __init__(self, *args, **kwargs) -> None:
-        # hide Textual's built-in command-palette key (we show '?' instead)
+        # hide Textual's built-in command-palette key (we show F1 instead)
         kwargs.setdefault("show_command_palette", False)
         super().__init__(*args, **kwargs)
 
     def compose(self) -> ComposeResult:
         yield from super().compose()
-        yield FooterKey("?", "?", "Help", "help", classes="-command-palette")
+        yield FooterKey("f1", "F1", "Help", "help", classes="-command-palette")
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +353,78 @@ class RuleEditor(ModalScreen):
         Binding("up", "prev_field", "Prev field", show=False),
         Binding("down", "next_field", "Next field", show=False),
     ]
+
+    # Per-field context help, shown by F1 (the help key) for the focused
+    # field. Keyed by the field widget id.
+    FIELD_HELP = {
+        "f-chain": "The chain to add the rule to (INPUT, FORWARD, OUTPUT, "
+                   "PREROUTING, POSTROUTING).",
+        "f-iface": "The network interface on the firewall the rule applies "
+                    "to (-i/-o), e.g. eth0, vlan10.",
+        "f-src": "Source address: a host, hostgroup, network, networkgroup, "
+                  "dns name, or a raw IP/address.",
+        "f-dst": "Destination address: a host, hostgroup, network, "
+                  "networkgroup, dns name, or a raw IP/address.",
+        "f-svc": "Destination port/service (--dport). Pick a db service or "
+                  "enter a custom port.",
+        "f-proto": "IP protocol: tcp, udp, icmp, icmpv6, or all.",
+        "f-limit": "Rate limit: limit(rate[,burst]), e.g. 10/min,5. Limits "
+                    "how often the rule matches.",
+        "f-state": "Connection state: state(NEW,ESTABLISHED). Matches "
+                    "conntrack states (NEW, ESTABLISHED, RELATED, INVALID, "
+                    "UNTRACKED).",
+        "f-time": "Time window: time(start-stop[,weekdays]), e.g. "
+                   "08:00-18:00,Mon-Fri.",
+        "f-recent": "Recent (fail2ban-style): recent(set|check[,seconds[,hitcount]]). "
+                     "A 'set' rule marks a source as seen; a 'check' rule "
+                     "matches if that source was seen recently.",
+        "f-mac": "Source MAC address: mac(macaddr), e.g. 00:11:22:33:44:55. "
+                  "Matches the source MAC of the packet.",
+        "f-rpfilter": "Reverse-path filter (anti-spoofing): "
+                       "rpfilter(loose|strict|validmark). Verifies the source "
+                       "address is reachable via the interface it arrived on.",
+        "f-string": "Content match: string(pattern), e.g. GET /admin. Matches "
+                     "packets whose payload contains the string.",
+        "f-owner": "Match by local user/uid: owner(uid). Only meaningful for "
+                    "locally-generated output packets.",
+        "f-frag": "Fragmentation: frag(more|first). Matches fragment packets.",
+        "f-action": "The target/action: ACCEPT, DROP, reject(...), log, "
+                     "DNAT, SNAT, MASQUERADE, dscp(...).",
+        "f-to-host": "NAT destination host (--to-destination). For DNAT.",
+        "f-to-svc": "NAT destination service/port. For DNAT.",
+        "f-logprefix": "Prefix for the log action: log(prefix[,rate]).",
+        "f-lograte": "Rate limit for the log action: log(prefix,rate), "
+                      "e.g. 10/min.",
+        "f-extra": "Extra raw iptables arguments appended verbatim to the "
+                    "rule.",
+    }
+
+    def focused_field_help(self) -> tuple[str, str] | None:
+        """(label, description) for the currently-focused field, or None."""
+        f = self.focused
+        if f is None:
+            return None
+        # source/dest are composite (type + value + custom); map any of their
+        # sub-fields to the same help
+        help_id = {"f-src-type": "f-src", "f-src-val": "f-src",
+                   "f-src-custom": "f-src", "f-dst-type": "f-dst",
+                   "f-dst-val": "f-dst", "f-dst-custom": "f-dst"}.get(
+                       f.id, f.id)
+        label = {"f-src": "Source", "f-dst": "Destination"}.get(help_id)
+        if label is None:
+            # find the row label for this field id
+            for row in self.query(".frow"):
+                try:
+                    lab = row.query_one(".flabel")
+                except NoMatches:
+                    continue
+                if row.query(f"#{f.id}"):
+                    label = str(lab.content)
+                    break
+        desc = self.FIELD_HELP.get(help_id)
+        if desc is None:
+            return None
+        return (label or f.id, desc)
 
     def __init__(self, table: str, proto: str, text: str = "",
                  db: "expand.Db | None" = None,
@@ -540,13 +613,10 @@ class RuleEditor(ModalScreen):
         yield Static("Rule editor", classes="modal-title")
         with Horizontal(id="editor-body"):
             with FieldScroll(id="builder"):
-                yield self._row("Proto", NavSelect(
-                    PROTOS, value=self.proto, id="f-proto",
-                    classes="fselect -textual-compact", allow_blank=False))
                 yield self._row("Chain", NavSelect(
                     self._chains(), id="f-chain",
                     classes="fselect -textual-compact", allow_blank=False))
-                yield self._row("Iface",
+                yield self._row("Interface",
                     NavSelect(self._iface_options(), value="", id="f-iface",
                               classes="fselect -textual-compact",
                               allow_blank=False)
@@ -558,25 +628,9 @@ class RuleEditor(ModalScreen):
                 yield self._row("Service", NavSelect(
                     self._service_options(), value="", id="f-svc",
                     classes="fselect -textual-compact", allow_blank=False))
-                yield self._row("Action", NavSelect(
-                    self._actions(), value="ACCEPT", id="f-action",
+                yield self._row("Proto", NavSelect(
+                    PROTOS, value=self.proto, id="f-proto",
                     classes="fselect -textual-compact", allow_blank=False))
-                yield self._row("To host", NavSelect(
-                    [("(none)", "")] + [(f"host({h})", f"host({h})")
-                                          for h in self.hosts],
-                    value="", id="f-to-host",
-                    classes="fselect -textual-compact", allow_blank=False),
-                    classes="natrow")
-                yield self._row("To svc", NavSelect(
-                    self._to_svc_options(), value="", id="f-to-svc",
-                    classes="fselect -textual-compact", allow_blank=False),
-                    classes="natrow")
-                yield self._row("Log prefix", Input(
-                    placeholder="e.g. apache dropped", id="f-logprefix",
-                    classes="finput -textual-compact"), classes="logrow")
-                yield self._row("Log rate", Input(
-                    placeholder="e.g. 10/min (optional)", id="f-lograte",
-                    classes="finput -textual-compact"), classes="logrow")
                 yield self._row("Rate limit", Input(
                     placeholder="e.g. 10/min,5", id="f-limit",
                     classes="finput -textual-compact"))
@@ -604,6 +658,25 @@ class RuleEditor(ModalScreen):
                 yield self._row("Frag", Input(
                     placeholder="more | first", id="f-frag",
                     classes="finput -textual-compact"))
+                yield self._row("Action", NavSelect(
+                    self._actions(), value="ACCEPT", id="f-action",
+                    classes="fselect -textual-compact", allow_blank=False))
+                yield self._row("To host", NavSelect(
+                    [("(none)", "")] + [(f"host({h})", f"host({h})")
+                                          for h in self.hosts],
+                    value="", id="f-to-host",
+                    classes="fselect -textual-compact", allow_blank=False),
+                    classes="natrow")
+                yield self._row("To svc", NavSelect(
+                    self._to_svc_options(), value="", id="f-to-svc",
+                    classes="fselect -textual-compact", allow_blank=False),
+                    classes="natrow")
+                yield self._row("Log prefix", Input(
+                    placeholder="e.g. apache dropped", id="f-logprefix",
+                    classes="finput -textual-compact"), classes="logrow")
+                yield self._row("Log rate", Input(
+                    placeholder="e.g. 10/min (optional)", id="f-lograte",
+                    classes="finput -textual-compact"), classes="logrow")
                 yield self._row("Extra", Input(
                     placeholder="e.g. -m limit --limit 10/min", id="f-extra",
                     classes="finput -textual-compact"))
@@ -1023,12 +1096,13 @@ class RuleEditor(ModalScreen):
         return ("services", svc)
 
     # -- form navigation ----------------------------------------------------
-    FIELD_IDS = ("f-proto", "f-chain", "f-iface", "f-src-type",
-                 "f-src-val", "f-src-custom", "f-dst-type", "f-dst-val",
-                 "f-dst-custom", "f-svc", "f-action", "f-to-host",
-                 "f-to-svc", "f-logprefix", "f-lograte", "f-limit",
+    FIELD_IDS = ("f-chain", "f-iface", "f-src-type", "f-src-val",
+                 "f-src-custom", "f-dst-type", "f-dst-val",
+                 "f-dst-custom", "f-svc", "f-proto", "f-limit",
                  "f-state", "f-time", "f-recent", "f-mac", "f-rpfilter",
-                 "f-string", "f-owner", "f-frag", "f-extra", "f-raw")
+                 "f-string", "f-owner", "f-frag", "f-action",
+                 "f-to-host", "f-to-svc", "f-logprefix", "f-lograte",
+                 "f-extra", "f-raw")
 
     @staticmethod
     def _effectively_visible(widget) -> bool:
@@ -1101,7 +1175,7 @@ class RuleEditor(ModalScreen):
     def _focus_component(self, idx: int) -> None:
         idx %= 4
         if idx == 0:
-            self.query_one("#f-proto").focus()
+            self.query_one("#f-chain").focus()
         elif idx == 1:
             self.query_one("#btn-save").focus()
         elif idx == 2:
@@ -1421,6 +1495,7 @@ class HelpPopup(ModalScreen):
     BINDINGS = [
         Binding("escape", "close", "Close"),
         Binding("q", "close", "Close", show=False),
+        Binding("f1", "close", "Close", show=False),
         Binding("?", "close", "Close", show=False),
     ]
 
@@ -2011,7 +2086,7 @@ class FirewallApp(App):
         Binding("g", "git", "Git"),
         Binding("ctrl+z", "undo", "Undo"),
         Binding("ctrl+s", "save", "Save"),
-        Binding("?", "help", "Help"),
+        Binding("f1", "help", "Help"),
         Binding("q", "quit", "Quit"),
         Binding("escape", "focus_tabs", "Back to tabs", show=False),
     ]
@@ -2518,8 +2593,16 @@ class FirewallApp(App):
             self.exit()
 
     def action_help(self) -> None:
-        """? : pop up the list of currently-available key bindings, split into
-        keys that work everywhere and keys that depend on the current context."""
+        """F1 : pop up context help: the currently-available key bindings
+        (split into keys that work everywhere and keys that depend on the
+        current context), plus, in the rule editor, a description of the
+        currently-focused field."""
+        groups: list[tuple[str, list[tuple[str, str]]]] = []
+        # in the rule editor, lead with the focused field's context help
+        if isinstance(self.screen, RuleEditor):
+            fh = self.screen.focused_field_help()
+            if fh:
+                groups.append((f"Field: {fh[0]}", [(fh[0], fh[1])]))
         # actions that are meaningful on every screen (whenever applicable)
         universal = {"help", "quit", "undo", "save", "validate", "preview",
                      "deploy", "git", "edit"}
@@ -2534,7 +2617,6 @@ class FirewallApp(App):
                 continue
             item = (self.get_key_display(binding), binding.description)
             (everywhere if binding.action in universal else context).append(item)
-        groups: list[tuple[str, list[tuple[str, str]]]] = []
         if everywhere:
             groups.append(("Everywhere", sorted(everywhere)))
         if context:
