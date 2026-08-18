@@ -237,30 +237,61 @@ class RulesView(ScrollView):
         self._recompute_widths()
 
     # -- column widths -----------------------------------------------------
-    def _compute_widths(self) -> list[int]:
-        """Content-based column widths for the visible rows, shrunk to fit
-        the view width so no columns fall outside the window and no space
-        is wasted. The widest columns are shrunk first (min 3 chars)."""
-        width = self.size.width
-        if width <= 0:
-            return list(self.col_widths)
+    # Per-column cap on the natural (content-driven) width, so a single very
+    # long value (e.g. a long string() match pattern) cannot force a column
+    # to dominate the whole table. Values longer than this get truncated.
+    MAX_COL_WIDTH = 40
+
+    def _content_widths(self) -> list[int]:
+        """Natural content widths across all rule rows in this view (capped).
+        Uses all_rows, not just the visible rows, so the columns are sized to
+        the section's content even while it is collapsed and the header stays
+        stable across expand/collapse/filter."""
         cw = [len(h) for h in COLUMNS]
-        for row in self.rows:
+        for row in self.all_rows:
             if row[0] not in ("rule", "implicit"):
                 continue
             cols = row[-1]
             for i, c in enumerate(COLUMNS):
                 cw[i] = max(cw[i], len(str(cols.get(c, "any"))))
-        spaces = len(COLUMNS) - 1
-        if sum(cw) + spaces <= width:
-            return cw
-        cw = list(cw)
-        while sum(cw) + spaces > width:
-            i = max(range(len(cw)), key=lambda i: cw[i])
-            if cw[i] <= 3:
-                break
-            cw[i] -= 1
-        return cw
+        return [min(w, self.MAX_COL_WIDTH) for w in cw]
+
+    def _compute_widths(self) -> list[int]:
+        """Column widths that fill the view width and avoid truncating values
+        whenever there is room.
+
+        Start from each column's natural width (header + longest value). If
+        the total fits, grow the columns proportionally to their natural width
+        so the table spans the full width (no wasted right margin) and every
+        column gets as much room as possible. If the total is wider than the
+        view, shrink the widest columns first (min 3 chars) to fit."""
+        width = self.size.width
+        if width <= 0:
+            return list(self.col_widths)
+        n = len(COLUMNS)
+        spaces = n - 1
+        cw = self._content_widths()
+        total = sum(cw) + spaces
+        if total > width:
+            # doesn't fit: shrink widest columns first, truncating only what
+            # is necessary
+            widths = list(cw)
+            while sum(widths) + spaces > width:
+                i = max(range(n), key=lambda i: widths[i])
+                if widths[i] <= 3:
+                    break
+                widths[i] -= 1
+            return widths
+        # fits: distribute the surplus proportionally to natural width so the
+        # table fills the screen and content-heavy columns get more room
+        base = sum(cw)
+        widths = [w + (width - spaces - base) * w // base for w in cw]
+        # spread any rounding remainder over the widest columns first
+        rem = width - spaces - sum(widths)
+        for k in range(rem):
+            i = max(range(n), key=lambda i: cw[i])
+            widths[i] += 1
+        return widths
 
     def _recompute_widths(self) -> None:
         """Recompute the column widths and announce changes (for the header)."""

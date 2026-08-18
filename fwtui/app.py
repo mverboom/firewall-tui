@@ -3754,8 +3754,8 @@ class FirewallApp(App):
 
     def on_rules_view_widths_changed(self, event) -> None:
         """Column widths changed: keep the header line of that view in sync."""
-        wid = {"#rules-view": "#rules-header", "#nat-view": "#nat-header",
-               "#mangle-view": "#mangle-header"}.get(event.view.id)
+        wid = {"rules-view": "#rules-header", "nat-view": "#nat-header",
+               "mangle-view": "#mangle-header"}.get(event.view.id)
         if wid:
             self.query_one(wid, Static).update(header_text(event.widths))
 
