@@ -1464,29 +1464,44 @@ class ServiceEditor(ModalScreen):
         elif event.button.id == "btn-cancel":
             self.action_cancel()
 
-    def _fields(self) -> list:
-        return [self.query_one(f"#{wid}") for wid in self.FIELD_IDS
-                if self.query_one(f"#{wid}").display]
+    @staticmethod
+    def _effectively_visible(widget) -> bool:
+        """True when a widget is actually shown (its own and every ancestor's
+        display is not none)."""
+        node = widget
+        while node is not None:
+            if not node.display:
+                return False
+            node = node.parent
+        return True
+
+    def _focus_cycle(self) -> list:
+        """The focusable widgets in navigation order: the visible fields
+        followed by the Save/Cancel buttons."""
+        cycle = [self.query_one(f"#{wid}") for wid in self.FIELD_IDS
+                 if self._effectively_visible(self.query_one(f"#{wid}"))]
+        cycle += [self.query_one("#btn-save"), self.query_one("#btn-cancel")]
+        return cycle
 
     def action_next_field(self) -> None:
-        fields = self._fields()
-        if not fields:
+        cycle = self._focus_cycle()
+        if not cycle:
             return
         cur = self.focused
-        if cur in fields:
-            fields[(fields.index(cur) + 1) % len(fields)].focus()
+        if cur in cycle:
+            cycle[(cycle.index(cur) + 1) % len(cycle)].focus()
         else:
-            fields[0].focus()
+            cycle[0].focus()
 
     def action_prev_field(self) -> None:
-        fields = self._fields()
-        if not fields:
+        cycle = self._focus_cycle()
+        if not cycle:
             return
         cur = self.focused
-        if cur in fields:
-            fields[(fields.index(cur) - 1) % len(fields)].focus()
+        if cur in cycle:
+            cycle[(cycle.index(cur) - 1) % len(cycle)].focus()
         else:
-            fields[-1].focus()
+            cycle[-1].focus()
 
     def focused_field_help(self) -> tuple[str, str] | None:
         f = self.focused
