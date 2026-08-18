@@ -142,11 +142,23 @@ CDIST_* variables stay uppercase.
 ## Usage
 
 ```sh
-./firewall-tui [config-file] [fwdir] [includedir]
+./firewall-tui [HOST] [--config FILE] [--fwdir DIR] [--includedir DIR]
 ```
 
-The optional positional arguments override the config file (`fwdir` and
-`includedir` are handy for pointing the TUI at a scratch copy).
+A bare positional `HOST` names a firewall (host) ruleset to open directly,
+landing on its Rules tab. With no `HOST` the TUI starts with the host
+selector open so a quick pick can be made.
+
+The `--config`, `--fwdir` and `--includedir` options override the config
+file (`--fwdir`/`--includedir` are handy for pointing the TUI at a scratch
+copy).
+
+Shell completion for the `HOST` argument and the options is available in
+`firewall-tui-completion.bash` — source it from your shell rc:
+
+```sh
+. /path/to/firewall-tui/firewall-tui-completion.bash
+```
 
 ### Screen layout
 

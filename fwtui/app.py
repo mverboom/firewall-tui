@@ -24,6 +24,7 @@ Keys:
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import copy
 import os
@@ -31,7 +32,6 @@ import re
 import shlex
 import shutil
 import subprocess
-import sys
 import tempfile
 
 from rich.markup import escape
@@ -1989,7 +1989,8 @@ class FirewallApp(App):
         Binding("escape", "focus_tabs", "Back to tabs", show=False),
     ]
 
-    def __init__(self, fwdir: str | None = None,
+    def __init__(self, host: str | None = None,
+                 fwdir: str | None = None,
                  includedir: str | None = None,
                  config_path: str | None = None) -> None:
         super().__init__()
@@ -2020,6 +2021,11 @@ class FirewallApp(App):
         self.db_mode = False
         self._pending_host: str | None = None
         self._pending_jump: tuple | None = None
+        # host requested on the command line (None = open the selector instead)
+        self._requested_host = host
+        # True while the startup auto-selection (first host) is being applied,
+        # so its Select.Changed is consumed instead of loading a ruleset
+        self._suppress_host_changed = True
         # git state (cached: the repo status does not change mid-session)
         self._git_info_cache: tuple[bool, str] | None = None
 
@@ -2067,12 +2073,32 @@ class FirewallApp(App):
         sel = self.query_one("#host-select", Select)
         sel.add_class("-textual-compact")
         sel.set_options([(h, h) for h in self.hosts])
-        if self.hosts:
-            sel.value = self.hosts[0]
-            self._load_ruleset(self.hosts[0])
+        requested = self._requested_host
+        if self.hosts and requested and requested in self.hosts:
+            # explicit host: preselect it and load it (the Select.Changed it
+            # posts is suppressed until startup settles in _finish_startup)
+            sel.value = requested
+            self._switch_host(requested)
+        elif requested is not None:
+            self.notify(f"Unknown firewall '{requested}'", severity="warning")
         self._populate_db()
         self.refresh_bindings()
-        self.rules_view.focus()
+        # apply focus / open the selector after the startup Select.Changed
+        # messages have been consumed, so they can't disturb it
+        self.set_timer(0.1, self._finish_startup)
+
+    def _finish_startup(self) -> None:
+        """Apply the startup focus (and open the selector when no host was
+        requested), once the auto-selection Select.Changed messages settle,
+        then stop suppressing the host selector."""
+        requested = self._requested_host
+        if requested and requested in self.hosts:
+            self.rules_view.focus()
+        else:
+            sel = self.query_one("#host-select", Select)
+            sel.focus()
+            sel.action_show_overlay()
+        self._suppress_host_changed = False
 
     def _load_hosts(self) -> None:
         self.hosts = sorted(
@@ -2297,18 +2323,23 @@ class FirewallApp(App):
         self.refresh_bindings()
 
     def on_select_changed(self, event: Select.Changed) -> None:
-        if event.select.id == "host-select":
-            if event.value is Select.NULL or not event.value:
-                return  # placeholder/blank selection: ignore
-            if event.value == self.current_host:
-                return  # re-selected the current host (e.g. after a
-                        # cancelled switch): do not reload it
-            if self.dirty:
-                # confirm before discarding the current host's edits
-                self._pending_host = event.value
-                self.push_screen(ConfirmSwitch(), self._on_switch_confirm)
-                return
-            self._switch_host(event.value)
+        if event.select.id != "host-select":
+            return
+        if self._suppress_host_changed:
+            # startup auto-selection of the placeholder/first host: ignore it
+            # (cleared once startup settles in _finish_startup)
+            return
+        if event.value is Select.NULL or not event.value:
+            return  # placeholder/blank selection: ignore
+        if event.value == self.current_host:
+            return  # re-selected the current host (e.g. after a
+                    # cancelled switch): do not reload it
+        if self.dirty:
+            # confirm before discarding the current host's edits
+            self._pending_host = event.value
+            self.push_screen(ConfirmSwitch(), self._on_switch_confirm)
+            return
+        self._switch_host(event.value)
 
     def _switch_host(self, host: str) -> None:
         self._set_db_mode(False)
@@ -3730,11 +3761,39 @@ class FirewallApp(App):
 
 
 def main() -> None:
-    # optional args: [config-file] [fwdir] [includedir]
-    config_path = sys.argv[1] if len(sys.argv) > 1 else None
-    fwdir = sys.argv[2] if len(sys.argv) > 2 else None
-    includedir = sys.argv[3] if len(sys.argv) > 3 else None
-    FirewallApp(fwdir, includedir, config_path).run()
+    """Parse command-line args and run the app.
+
+    A bare positional is always the host (firewall) name to open. The
+    config-related overrides are named options:
+        firewall-tui [HOST] [--config FILE] [--fwdir DIR] [--includedir DIR]
+    With no HOST the app starts with the host selector open for a quick pick.
+    """
+    parser = argparse.ArgumentParser(
+        prog="firewall-tui",
+        description="Textual TUI for managing __firewall rulesets.",
+    )
+    parser.add_argument(
+        "host", nargs="?", default=None, metavar="HOST",
+        help="firewall (host) ruleset to open; omitted starts with the "
+             "host selector open",
+    )
+    parser.add_argument(
+        "--config", dest="config_path", default=None, metavar="FILE",
+        help="config file (default: ~/.firewall-tui.conf, else "
+             "firewall-tui.conf next to the project)",
+    )
+    parser.add_argument(
+        "--fwdir", default=None, metavar="DIR",
+        help="override the directory containing the per-host rulesets",
+    )
+    parser.add_argument(
+        "--includedir", default=None, metavar="DIR",
+        help="override the directory for [#include] files",
+    )
+    args = parser.parse_args()
+    FirewallApp(host=args.host, fwdir=args.fwdir,
+                includedir=args.includedir,
+                config_path=args.config_path).run()
 
 
 if __name__ == "__main__":
