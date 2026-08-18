@@ -360,13 +360,17 @@ class RuleEditor(ModalScreen):
         Binding("escape", "cancel", "Cancel"),
         Binding("ctrl+s", "save", "Save"),
         Binding("s", "save", "Save", show=False),
+        # 'a' works when the dropdown is closed; 'ctrl+n' (non-printable)
+        # also works while a dropdown is open, where type-to-search swallows
+        # printable keys like 'a'.
         Binding("a", "add_db_entry", "Add db entry", show=False),
-        Binding("w", "where_used", "Where used", show=False),
+        Binding("ctrl+n", "add_db_entry", "New db entry"),
+        Binding("w", "where_used", "Where used"),
         Binding("up", "prev_field", "Prev field", show=False),
         Binding("down", "next_field", "Next field", show=False),
         # F1 context help (the app-level binding is not reachable while this
         # modal is open, so bind it here too, namespaced to the app action)
-        Binding("f1", "app.help", "Help", show=False),
+        Binding("f1", "app.help", "Help"),
     ]
 
     # Per-field context help, shown by F1 (the help key) for the focused
@@ -729,6 +733,7 @@ class RuleEditor(ModalScreen):
         with Horizontal(id="modal-buttons"):
             yield Button("Save", variant="primary", id="btn-save")
             yield Button("Cancel", id="btn-cancel")
+        yield Footer()
 
     def on_mount(self) -> None:
         # -textual-compact cannot be passed via classes= (leading-dash tokens
@@ -1025,10 +1030,68 @@ class RuleEditor(ModalScreen):
 
     # -- add a db entry without leaving the editor --------------------------
     def action_add_db_entry(self) -> None:
-        self.app.push_screen(
-            Prompt("Add db entry (section:key=value)",
-                   placeholder="services:name=port/proto"),
-            self._on_add_db_entry)
+        """a: add a db entry without leaving the rule editor. When the
+        focused field is a db reference (source/destination host/network/
+        group, service, NAT to-host/to-svc) the structured editor for that
+        section opens; otherwise fall back to a raw section:key=value
+        prompt."""
+        section = self._focused_db_section()
+        if section:
+            self._add_section = section
+            self.app.push_screen(
+                self.app._new_db_editor(section), self._on_add_db_entry_structured)
+        else:
+            self.app.push_screen(
+                Prompt("Add db entry (section:key=value)",
+                       placeholder="services:name=port/proto"),
+                self._on_add_db_entry)
+
+    def _focused_field_id(self) -> str | None:
+        """The id of the focused field. When a dropdown is open the focused
+        widget is its SelectOverlay, so map it back to the parent Select
+        field (whose id is the logical field)."""
+        f = self.focused
+        if f is None:
+            return None
+        if isinstance(f, SelectOverlay) and f.parent is not None:
+            return f.parent.id
+        return f.id
+
+    def _focused_db_section(self) -> str | None:
+        """The db section implied by the focused field's type, or None when
+        the field is not a db reference (e.g. 'any'/'custom' source)."""
+        fid = self._focused_field_id()
+        if fid is None:
+            return None
+        kind_section = {"host": "hosts", "hostgroup": "hostgroups",
+                        "network": "networks",
+                        "networkgroup": "networkgroups"}
+        if fid in ("f-src-type", "f-src-val", "f-src-custom"):
+            return kind_section.get(
+                self.query_one("#f-src-type", Select).value)
+        if fid in ("f-dst-type", "f-dst-val", "f-dst-custom"):
+            return kind_section.get(
+                self.query_one("#f-dst-type", Select).value)
+        if fid == "f-svc":
+            return "services"
+        if fid == "f-to-host":
+            return "hosts"
+        if fid == "f-to-svc":
+            return "services"
+        return None
+
+    def _on_add_db_entry_structured(self, result) -> None:
+        """A structured db editor (opened from a focused db field) was
+        dismissed: save the entry and refresh this editor's dropdowns."""
+        if not result:
+            return
+        section = getattr(self, "_add_section", None)
+        if not section:
+            return
+        key, value = result["key"], result["value"]
+        if not self.app._add_db_entry_direct(section, key, value):
+            return  # validation failed (notification already shown)
+        self._refresh_after_db_add(section, key)
 
     def _on_add_db_entry(self, text) -> None:
         if not text or ":" not in text or "=" not in text:
@@ -1044,7 +1107,11 @@ class RuleEditor(ModalScreen):
             return
         if not self.app._add_db_entry_direct(section, key, value):
             return  # validation failed (notification already shown)
-        # refresh this editor's db and dropdowns
+        self._refresh_after_db_add(section, key)
+
+    def _refresh_after_db_add(self, section: str, key: str) -> None:
+        """Reload this editor's db snapshot and rebuild the db-backed
+        dropdowns after a db entry was added."""
         self.db = self.app.db
         self.services = list(self.db.services)
         self.hosts = list(self.db.hosts)
@@ -1132,10 +1199,9 @@ class RuleEditor(ModalScreen):
     def _focused_db_ref(self):
         """The (section, key) db object the currently-focused field holds,
         or None if it is not a db reference."""
-        f = self.focused
-        if f is None or f.id is None:
+        fid = self._focused_field_id()
+        if fid is None:
             return None
-        fid = f.id
         if fid in ("f-src-type", "f-src-val", "f-src-custom"):
             return self._src_field_db_ref("f-src")
         if fid in ("f-dst-type", "f-dst-val", "f-dst-custom"):
@@ -1687,8 +1753,8 @@ class HostNetworkEditor(BaseEditor):
 
     FIELD_HELP = {
         "db-key": "The name, used as host(name)/network(name) in rules.",
-        "db-values": "One or more values. Hosts: IP addresses. "
-                     "Networks: network/mask, e.g. 192.168.0.0/24.",
+        "db-values": "Hosts: one or more IP addresses. "
+                     "Networks: a network/mask, e.g. 192.168.0.0/24.",
     }
     FIELD_IDS = ("db-key", "db-values")
 
@@ -1707,9 +1773,11 @@ class HostNetworkEditor(BaseEditor):
                        if self.section == "hosts"
                        else "e.g. 192.168.0.0/24")
         yield Static(f"{verb} {noun}", classes="modal-title")
+        value_label = ("IP address" if self.section == "hosts"
+                        else "Network")
         yield self._row("Name", Input(self.key, id="db-key",
                         classes="finput -textual-compact"))
-        yield self._row("Values", Input(
+        yield self._row(value_label, Input(
             self.value, id="db-values", placeholder=placeholder,
             classes="finput -textual-compact"))
         yield Static("", id="db-error", classes="dberror")
