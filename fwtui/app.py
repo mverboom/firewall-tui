@@ -47,6 +47,7 @@ from textual.widgets import (
 )
 from textual.widgets._select import SelectOverlay
 from textual.widgets._tabbed_content import ContentTabs
+from textual.widgets._footer import FooterKey
 
 from . import columns, expand, implicit, parser
 from .config import load_config
@@ -187,6 +188,21 @@ class NavDataTable(DataTable):
             self.post_message(self.NavigateUp())
         else:
             super().action_cursor_up()
+
+
+class HelpFooter(Footer):
+    """Footer that always pins a '?' Help key on the right edge, so the way
+    to open the key-binding help is never scrolled out of view even when the
+    other keys overflow a narrow terminal."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        # hide Textual's built-in command-palette key (we show '?' instead)
+        kwargs.setdefault("show_command_palette", False)
+        super().__init__(*args, **kwargs)
+
+    def compose(self) -> ComposeResult:
+        yield from super().compose()
+        yield FooterKey("?", "?", "Help", "help", classes="-command-palette")
 
 
 # ---------------------------------------------------------------------------
@@ -1366,6 +1382,40 @@ class ConfirmQuit(ModalScreen):
 # validation results modal
 # ---------------------------------------------------------------------------
 
+class HelpPopup(ModalScreen):
+    """Lists the key bindings that are currently available (the '?' help)."""
+
+    CSS = """
+    HelpPopup #help-list { height: 24; }
+    """
+
+    BINDINGS = [
+        Binding("escape", "close", "Close"),
+        Binding("q", "close", "Close", show=False),
+        Binding("?", "close", "Close", show=False),
+    ]
+
+    def __init__(self, bindings: list[tuple[str, str]]) -> None:
+        super().__init__()
+        self.bindings = bindings
+
+    def compose(self) -> ComposeResult:
+        yield Static(f"Available key bindings ({len(self.bindings)})",
+                     classes="modal-title")
+        items = [ListItem(Label(f"  {key:<14}{desc}"))
+                 for key, desc in self.bindings]
+        yield ListView(*items, id="help-list")
+        with Horizontal(id="modal-buttons"):
+            yield Button("Close", id="btn-close")
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-close":
+            self.dismiss(None)
+
+
 class ValidationReport(ModalScreen):
     """Validation results; enter on an issue closes the window and jumps
     to the rule it refers to."""
@@ -1929,6 +1979,7 @@ class FirewallApp(App):
         Binding("g", "git", "Git"),
         Binding("ctrl+z", "undo", "Undo"),
         Binding("ctrl+s", "save", "Save"),
+        Binding("?", "help", "Help"),
         Binding("q", "quit", "Quit"),
         Binding("escape", "focus_tabs", "Back to tabs", show=False),
     ]
@@ -1990,7 +2041,7 @@ class FirewallApp(App):
                     yield NavDataTable(id="global-table", zebra_stripes=True,
                                        cursor_type="row")
             yield DbView(id="db-view")
-        yield Footer()
+        yield HelpFooter()
 
     def on_mount(self) -> None:
         self._load_hosts()
@@ -2402,6 +2453,14 @@ class FirewallApp(App):
             self.push_screen(ConfirmQuit(), self._on_quit_confirm)
         else:
             self.exit()
+
+    def action_help(self) -> None:
+        """? : pop up the list of currently-available key bindings."""
+        shown: set[tuple[str, str]] = set()
+        for _key, (_ns, binding, enabled, _tooltip) in self.active_bindings.items():
+            if binding.show and binding.description and enabled:
+                shown.add((self.get_key_display(binding), binding.description))
+        self.push_screen(HelpPopup(sorted(shown)))
 
     def _on_quit_confirm(self, result) -> None:
         if result:
@@ -3546,6 +3605,8 @@ class FirewallApp(App):
         the shared db view is open, whether a host is selected, and git state."""
         if action == "quit":
             return True
+        if action == "help":
+            return True  # '?' is always available
         if action == "undo":
             return bool(self.undo_stack)
         if action == "save":
