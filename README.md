@@ -42,12 +42,18 @@ Documentation:
 - **Rule editor**: a builder form for the common patterns (chain, `-i`, `-s`,
   `-d`, `dservice`, action, DNAT/SNAT target, extra options) with a live
   raw-text preview; the raw text is authoritative and editable, and the two
-  sync both ways. Source and Destination are two-step fields: pick a type
+  sync both ways. Match-clause fields (Rate limit, State, Schedule, Recent,
+  MAC, rpfilter, String, Owner, Frag) emit the `limit()` / `state()` /
+  `time()` / `recent()` / `mac()` / `rpfilter()` / `string()` / `owner()` /
+  `frag()` functions into the rule body; the mangle Action
+  dropdown offers `dscp(...)` QoS marking. Source and Destination are two-step fields: pick a type
   (any / host / hostgroup / dns / network / networkgroup / custom) first, then the
   value dropdown for that type or a raw-value input for custom/dns. The ipset
   set-match types (hostgroup / networkgroup / dns) are emitted in the rule
   body as `func(x) src` / `func(x) dst` rather than behind a `-s`/`-d` flag
-  (the manifest rejects the latter). The Service
+  (the manifest rejects the latter). The networkgroup dropdown also lists
+  predefined `G_<CC>` country groups (geo blocking) from the `[geoip]` MMDB
+  when configured. The Service
   dropdown shows each service's port/proto next to its name (e.g.
   `ssh (22/tcp)`) and type-to-search matches on it. `w` on a db field
   (Service, a host/network/group Source/Destination, or a NAT target)

@@ -17,7 +17,7 @@ import re
 from .expand import Db
 
 COLUMNS = ("chain", "from", "sport", "to", "proto", "port",
-           "action", "target")
+           "match", "action", "target")
 
 
 def _shorten(v: str) -> str:
@@ -95,10 +95,45 @@ def rule_columns(text: str, db: Db) -> dict:
     if m:
         cols["port"] = m.group(1)
 
+    # match clauses: limit/state/time/recent (shown combined in 'match')
+    match = []
+    m = re.search(r"limit\(([^)]+)\)", text)
+    if m:
+        match.append(f"limit:{m.group(1)}")
+    m = re.search(r"state\(([^)]+)\)", text)
+    if m:
+        match.append(f"state:{m.group(1)}")
+    m = re.search(r"time\(([^)]+)\)", text)
+    if m:
+        match.append(f"time:{m.group(1)}")
+    m = re.search(r"recent\(([^)]+)\)", text)
+    if m:
+        match.append(f"recent:{m.group(1)}")
+    m = re.search(r"mac\(([^)]+)\)", text)
+    if m:
+        match.append(f"mac:{m.group(1)}")
+    m = re.search(r"rpfilter\(([^)]*)\)", text)
+    if m:
+        match.append(f"rpfilter:{m.group(1) or 'on'}")
+    m = re.search(r"string\(([^)]+)\)", text)
+    if m:
+        match.append(f"string:{m.group(1)}")
+    m = re.search(r"owner\(([^)]+)\)", text)
+    if m:
+        match.append(f"owner:{m.group(1)}")
+    m = re.search(r"frag\(([^)]+)\)", text)
+    if m:
+        match.append(f"frag:{m.group(1)}")
+    if match:
+        cols["match"] = " ".join(match)
+
     # action
     m = re.search(r"-j\s+(\S+)", text)
     if m:
         cols["action"] = m.group(1).lower()
+    m = re.search(r"-j DSCP --set-dscp\s+(\S+)", text)
+    if m:
+        cols["action"] = f"dscp:{m.group(1)}"
     m = re.search(r"reject\(([^)]+)\)", text)
     if m:
         cols["action"] = f"reject:{m.group(1)}"

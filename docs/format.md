@@ -56,7 +56,13 @@ mangle=-A PREROUTING -j CONNMARK --restore-mark
 [hostgroups]      name=comma,list,of,hosts
 [networks]        name=network/mask [network...]
 [networkgroups]   name=comma,list,of,networks
+[geoip]           maxminddir=/path/to/maxminddbs   (config directive)
 ```
+
+- `[geoip] maxminddir` points to a directory of MaxMind GeoLite2 MMDB files
+  (the type reads `<maxminddir>/geolite2-country/geolite2-country.mmdb`). It is
+  a config directive, not a data section. Requires the `python3-maxminddb`
+  package on the cdist server.
 
 - Values may start with `@` to execute a command and use its output
   (e.g. `test2=@echo "shell,proxy"`).
@@ -78,12 +84,22 @@ by the TUI's `expand.py` for validation):
 | `hostgroup(name)` | `-m set --match-set <proto>-ip-<name>` | must be followed by `src`/`dst`; do **not** put `-s`/`-d` before it |
 | `dns(name)` | `-m set --match-set <proto>-dns-<name>` | DNS-resolved host; resolved periodically on the firewall host by `firewall-dns`; must be followed by `src`/`dst`, **not** `-s`/`-d` |
 | `network(name)` | `network/mask` | db `[networks]`, per proto |
-| `networkgroup(name)` | `-m set --match-set <proto>-net-<name>` | same `src`/`dst` rule as hostgroup |
+| `networkgroup(name)` | `-m set --match-set <proto>-net-<name>` | same `src`/`dst` rule as hostgroup; groups are recursive. A member `G_<CC>` (e.g. `G_CN`) resolves to a country's aggregated CIDRs from the `[geoip]` MMDB (geo blocking) |
 | `service(name)` | the port number | proto taken from the db |
 | `dservice(name)` | `-p <proto> --dport <port>` | icmp: `-p icmp` / `-p ipv6-icmp`, `--icmp-type` / `--icmpv6-type` |
 | `dservices(list\|group)` | `-p <proto> -m multiport --dports a,b,c` | single proto, max 15 ports |
 | `reject(reset\|unreachable\|prohibited)` | `-j REJECT --reject-with ...` | v6 rules use the `icmp6-*` variants |
-| `log(prefix)` | `-j NFLOG --nflog-prefix "<prefix> "` | |
+| `log(prefix[,rate])` | `-j NFLOG --nflog-prefix "<prefix> " [-m limit --limit <rate>]` | optional rate like `10/min` rate-limits the log |
+| `limit(rate[,burst])` | `-m limit --limit <rate> [--limit-burst <burst>]` | rate like `10/min` (`N/sec\|min\|hour\|day`); burst is a positive int |
+| `state(NEW,ESTABLISHED)` | `-m conntrack --ctstate NEW,ESTABLISHED` | ctstate: `NEW\|ESTABLISHED\|RELATED\|INVALID\|UNTRACKED`; finer control than the global `established` toggle |
+| `time(start-stop[,weekdays])` | `-m time --timestart <start> --timestop <stop> [--weekdays <days>]` | times are `HH:MM`; weekdays comma list of `Mon..Sun` |
+| `recent(set\|check[,seconds[,hitcount]])` | `-m recent --set` / `-m recent --update [--seconds N] [--hitcount N]` | fail2ban-style: a `set` rule marks, a `check` rule matches |
+| `mac(macaddr)` | `-m mac --mac-source <macaddr>` | source MAC, e.g. `00:11:22:33:44:55` |
+| `rpfilter(loose\|strict\|validmark)` | `-m rpfilter --loose\|--strict\|--validmark` | anti-spoofing reverse-path filter |
+| `dscp(0x2e)` | `-j DSCP --set-dscp 0x2e` | QoS marking; a target, valid in mangle |
+| `string(pattern)` | `-m string --string "<pattern>" --algo bm` | L7-ish content match |
+| `owner(uid)` | `-m owner --uid-owner <uid>` | match by user name or numeric uid (local output) |
+| `frag(more\|first)` | `-m frag --fragmore\|--fragfirst` | fragmentation handling |
 
 ## Common patterns seen in production
 

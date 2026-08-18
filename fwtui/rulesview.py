@@ -34,10 +34,10 @@ from textual.strip import Strip
 from .scrollview import NAV_BINDINGS, ScrollView
 
 COLUMNS = ("chain", "from", "sport", "to", "proto", "port",
-           "action", "target")
+           "match", "action", "target")
 # chain is 11 so "postrouting" (11 chars) is not truncated; every column is
 # joined with a space in the render so values never run together
-COL_WIDTHS = (11, 22, 6, 22, 6, 12, 10, 20)
+COL_WIDTHS = (11, 22, 6, 22, 6, 12, 12, 10, 20)
 
 SECTION_FG = "#a9b1d6"
 SECTION_BG = "#2a2f45"

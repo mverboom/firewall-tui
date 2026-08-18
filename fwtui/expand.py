@@ -28,6 +28,7 @@ class Db:
         self.hostgroups: dict[str, str] = {}
         self.networks: dict[str, str] = {}
         self.networkgroups: dict[str, str] = {}
+        self.geoip: dict[str, str] = {}  # [geoip] maxminddir=...
         if lines:
             self.load(lines)
 
@@ -160,7 +161,18 @@ def _expand_one(funcname: str, args: str, db: Db, proto: int,
         return args, errs, warns
 
     if funcname == "log":
-        return f'-j NFLOG --nflog-prefix "{args.replace("%", " ")} "', errs, warns
+        # log(prefix[,rate]) -> -j NFLOG --nflog-prefix "<prefix> " [-m limit --limit <rate>]
+        parts = args.split(",", 1)
+        prefix = parts[0]
+        rate = parts[1].strip() if len(parts) > 1 else ""
+        out = f'-j NFLOG --nflog-prefix "{prefix.replace("%", " ")} "'
+        if rate:
+            if not re.fullmatch(r"\d+/(sec|min|hour|day)", rate):
+                errs.append(f"log: rate '{rate}' must be like 10/min "
+                            f"(N/sec|min|hour|day)")
+                return args, errs, warns
+            out += f" -m limit --limit {rate}"
+        return out, errs, warns
 
     if funcname == "service":
         svc = db.services.get(args)
@@ -240,10 +252,141 @@ def _expand_one(funcname: str, args: str, db: Db, proto: int,
         return net, errs, warns
 
     if funcname == "networkgroup":
-        if args not in db.networkgroups:
+        if args in db.networkgroups:
+            _resolve_networkgroup(db, args, (), errs)
+        elif args.startswith("G_"):
+            _resolve_country(db, args, errs)
+        else:
             errs.append(f"Networkgroup '{args}' not found in db")
-            return args, errs, warns
         return f"-m set --match-set {proto}-net-{args}", errs, warns
+
+    if funcname == "limit":
+        # limit(rate[,burst]) -> -m limit --limit <rate> [--limit-burst <burst>]
+        parts = args.split(",", 1)
+        rate = parts[0].strip()
+        burst = parts[1].strip() if len(parts) > 1 else ""
+        if not re.fullmatch(r"\d+/(sec|min|hour|day)", rate):
+            errs.append(f"limit: rate '{rate}' must be like 10/min "
+                        f"(N/sec|min|hour|day)")
+            return args, errs, warns
+        out = f"-m limit --limit {rate}"
+        if burst:
+            if not re.fullmatch(r"\d+", burst):
+                errs.append(f"limit: burst '{burst}' must be a positive integer")
+                return args, errs, warns
+            out += f" --limit-burst {burst}"
+        return out, errs, warns
+
+    if funcname == "state":
+        # state(NEW,ESTABLISHED) -> -m conntrack --ctstate NEW,ESTABLISHED
+        states = [s.strip() for s in args.split(",")]
+        valid = {"NEW", "ESTABLISHED", "RELATED", "INVALID", "UNTRACKED"}
+        for s in states:
+            if s not in valid:
+                errs.append(f"state: unknown ctstate '{s}' "
+                            f"(NEW|ESTABLISHED|RELATED|INVALID|UNTRACKED)")
+        if errs:
+            return args, errs, warns
+        return f"-m conntrack --ctstate {','.join(states)}", errs, warns
+
+    if funcname == "time":
+        # time(start-stop[,weekdays]) -> -m time --timestart <start> --timestop <stop> [--weekdays <days>]
+        parts = args.split(",", 1)
+        times = parts[0].strip()
+        weekdays = parts[1].strip() if len(parts) > 1 else ""
+        if "-" not in times:
+            errs.append(f"time: '{times}' must be like 08:00-18:00")
+            return args, errs, warns
+        start, stop = times.split("-", 1)
+        if not re.fullmatch(r"\d{2}:\d{2}", start):
+            errs.append(f"time: start '{start}' must be HH:MM")
+        if not re.fullmatch(r"\d{2}:\d{2}", stop):
+            errs.append(f"time: stop '{stop}' must be HH:MM")
+        out = f"-m time --timestart {start} --timestop {stop}"
+        if weekdays:
+            days = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
+            for d in weekdays.split(","):
+                d = d.strip()
+                # single day (Mon) or a range (Mon-Fri)
+                if d not in days and not (
+                        "-" in d and d.split("-", 1)[0] in days
+                        and d.split("-", 1)[1] in days):
+                    errs.append(f"time: unknown weekday '{d}' (Mon..Sun)")
+            out += f" --weekdays {weekdays}"
+        if errs:
+            return args, errs, warns
+        return out, errs, warns
+
+    if funcname == "recent":
+        # recent(set) -> -m recent --set
+        # recent(check[,seconds[,hitcount]]) -> -m recent --update [--seconds N] [--hitcount N]
+        parts = args.split(",", 1)
+        mode = parts[0].strip()
+        rest = parts[1].strip() if len(parts) > 1 else ""
+        if mode == "set":
+            return "-m recent --set", errs, warns
+        if mode == "check":
+            sub = rest.split(",", 1)
+            seconds = sub[0].strip()
+            hitcount = sub[1].strip() if len(sub) > 1 else ""
+            out = "-m recent --update"
+            if seconds:
+                if not re.fullmatch(r"\d+", seconds):
+                    errs.append(f"recent: seconds '{seconds}' must be a positive integer")
+                else:
+                    out += f" --seconds {seconds}"
+            if hitcount:
+                if not re.fullmatch(r"\d+", hitcount):
+                    errs.append(f"recent: hitcount '{hitcount}' must be a positive integer")
+                else:
+                    out += f" --hitcount {hitcount}"
+            if errs:
+                return args, errs, warns
+            return out, errs, warns
+        errs.append(f"recent: unknown mode '{mode}' (set|check)")
+        return args, errs, warns
+
+    if funcname == "mac":
+        # mac(00:11:22:33:44:55) -> -m mac --mac-source <mac>
+        if not re.fullmatch(r"([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}", args):
+            errs.append(f"mac: '{args}' must be a MAC address like "
+                        f"00:11:22:33:44:55")
+            return args, errs, warns
+        return f"-m mac --mac-source {args}", errs, warns
+
+    if funcname == "rpfilter":
+        # rpfilter(loose|strict|validmark) -> -m rpfilter --<mode>
+        if args in ("loose", "strict", "validmark"):
+            return f"-m rpfilter --{args}", errs, warns
+        errs.append(f"rpfilter: unknown mode '{args}' (loose|strict|validmark)")
+        return args, errs, warns
+
+    if funcname == "dscp":
+        # dscp(0x2e) -> -j DSCP --set-dscp 0x2e
+        if not re.fullmatch(r"0x[0-9a-fA-F]{2}", args):
+            errs.append(f"dscp: '{args}' must be a hex value like 0x2e")
+            return args, errs, warns
+        return f"-j DSCP --set-dscp {args}", errs, warns
+
+    if funcname == "string":
+        # string(pattern) -> -m string --string "pattern" --algo bm
+        return f'-m string --string "{args}" --algo bm', errs, warns
+
+    if funcname == "owner":
+        # owner(uid) -> -m owner --uid-owner <uid>
+        if not re.fullmatch(r"[a-zA-Z0-9_-]+", args):
+            errs.append(f"owner: '{args}' must be a user name or numeric uid")
+            return args, errs, warns
+        return f"-m owner --uid-owner {args}", errs, warns
+
+    if funcname == "frag":
+        # frag(more|first) -> -m frag --fragmore|--fragfirst
+        if args == "more":
+            return "-m frag --fragmore", errs, warns
+        if args == "first":
+            return "-m frag --fragfirst", errs, warns
+        errs.append(f"frag: unknown mode '{args}' (more|first)")
+        return args, errs, warns
 
     errs.append(f"Unknown function '{funcname}()'")
     return args, errs, warns
@@ -282,6 +425,46 @@ def _netlookup(name: str, db: Db, proto: int, errs: list[str],
     return name
 
 
+def _resolve_country(db: Db, name: str, errs: list[str]) -> bool:
+    """Validate a predefined country group G_<CC> (resolved from the GeoLite2
+    MMDB at deploy time). Requires [geoip] maxminddir in the db. Does not read
+    the MMDB here (slow); the manifest catches a missing country at deploy."""
+    if not name.startswith("G_"):
+        errs.append(f"Networkgroup member '{name}' is not a network, group or country")
+        return False
+    cc = name[2:]
+    if not db.geoip.get("maxminddir"):
+        errs.append(f"geoip: country '{cc}' used but [geoip] maxminddir is not set in the db")
+        return False
+    if not re.fullmatch(r"[A-Z]{2}", cc):
+        errs.append(f"geoip: '{cc}' is not a 2-letter country code")
+        return False
+    return True
+
+
+def _resolve_networkgroup(db: Db, name: str, chain: tuple, errs: list[str]) -> bool:
+    """Recursively validate a networkgroup resolves: members may be a leaf
+    network, a nested networkgroup, or a predefined G_<CC> country group.
+    Detects circular references. Mirrors the manifest's netgroup_resolve."""
+    if name in chain:
+        errs.append(f"Networkgroup '{name}': circular reference "
+                    f"({' -> '.join(chain + (name,))})")
+        return False
+    members = db.networkgroups.get(name)
+    if members is None:
+        errs.append(f"Networkgroup '{name}' not found in db")
+        return False
+    ok = True
+    for m in (x.strip() for x in members.split(",") if x.strip()):
+        if m in db.networkgroups:
+            ok = _resolve_networkgroup(db, m, chain + (name,), errs) and ok
+        elif m in db.networks:
+            continue
+        else:
+            ok = _resolve_country(db, m, errs) and ok
+    return ok
+
+
 # ---------------------------------------------------------------------------
 # db entry validation
 # ---------------------------------------------------------------------------
@@ -301,9 +484,14 @@ def validate_db_value(section: str, value: str, db: Db | None = None) -> list[st
     if section == "networks":
         return _validate_network_list(value)
     if section in ("servicegroups", "hostgroups", "networkgroups"):
-        table = {"servicegroups": "services", "hostgroups": "hosts",
-                 "networkgroups": "networks"}[section]
-        return _validate_group_list(value, db, table)
+        leaf = {"servicegroups": "services", "hostgroups": "hosts",
+                "networkgroups": "networks"}[section]
+        return _validate_group_list(value, db, leaf, section)
+    if section == "geoip":
+        # [geoip] maxminddir=/path/to/maxminddbs
+        if not value.startswith("/"):
+            return ["expected an absolute path (e.g. /home/cdist/files.external/geoip2)"]
+        return []
     return []
 
 
@@ -363,17 +551,27 @@ def _is_ip_or_cidr(token: str) -> bool:
         return False
 
 
-def _validate_group_list(value: str, db: Db | None, table: str) -> list[str]:
-    """servicegroups/hostgroups/networkgroups: comma-separated member names."""
+def _validate_group_list(value: str, db: Db | None, leaf: str,
+                         group_section: str) -> list[str]:
+    """servicegroups/hostgroups/networkgroups: comma-separated member names.
+    networkgroups may also reference nested networkgroups and predefined
+    G_<CC> country groups (resolved from the GeoLite2 MMDB at deploy)."""
     errs = []
     toks = [t.strip() for t in value.split(",")]
     if any(not t for t in toks):
         errs.append("empty name in comma-separated list")
     if db is not None:
-        known = getattr(db, table, {})
+        known = getattr(db, leaf, {})
         for t in toks:
-            if t and t not in known:
-                errs.append(f"unknown {table.rstrip('s')} '{t}'")
+            if not t:
+                continue
+            if group_section == "networkgroups":
+                if t in db.networks or t in db.networkgroups or t.startswith("G_"):
+                    continue
+                errs.append(f"unknown network '{t}' (add it to [networks], "
+                            f"a [networkgroups] group, or use G_<CC> for a country)")
+            elif t not in known:
+                errs.append(f"unknown {leaf.rstrip('s')} '{t}'")
     return errs
 
 
@@ -462,6 +660,9 @@ def rule_db_refs(value: str, db: Db | None = None) -> set[tuple[str, str]]:
         else:
             section = _FUNC_TO_SECTION.get(funcname)
             if section:
+                # a predefined G_<CC> country group has no db entry
+                if funcname == "networkgroup" and args.startswith("G_"):
+                    continue
                 refs.add((section, args))
     return refs
 
@@ -532,6 +733,54 @@ def validate_globals(lines) -> list[str]:
         if k in globals_ and globals_[k] not in ("true", "false"):
             errs.append(f"{k}: '{globals_[k]}' must be true or false")
     return errs
+
+
+BUILTIN_CHAINS = {
+    "filter": {"INPUT", "OUTPUT", "FORWARD"},
+    "nat": {"PREROUTING", "INPUT", "OUTPUT", "POSTROUTING"},
+    "mangle": {"PREROUTING", "INPUT", "FORWARD", "OUTPUT", "POSTROUTING"},
+}
+
+# -j targets that are iptables built-ins, not user chains
+_TARGET_KEYWORDS = {
+    "ACCEPT", "DROP", "REJECT", "LOG", "NFLOG", "DNAT", "SNAT",
+    "MASQUERADE", "MARK", "CONNMARK", "RETURN", "QUEUE", "REDIRECT",
+}
+
+
+def validate_chains(lines) -> list[RuleIssue]:
+    """Validate custom chain definitions (:name - [0:0]) and that -A/-j
+    reference a defined chain in the rule's table. Returns issues (no raise)."""
+    defined = {t: set(c) for t, c in BUILTIN_CHAINS.items()}
+    for l in lines:
+        if l.kind == "rule":
+            m = re.match(r":(\S+)", l.value)
+            if m:
+                defined.setdefault(l.table, set()).add(m.group(1))
+    issues: list[RuleIssue] = []
+    current_section = "(no section)"
+    for l in lines:
+        if l.kind in ("section", "include"):
+            current_section = l.name
+            continue
+        if l.kind != "rule":
+            continue
+        errs: list[str] = []
+        m = re.search(r"-[AI]\s+(\S+)", l.value)
+        if m and m.group(1) not in defined.get(l.table, set()):
+            errs.append(f"Unknown chain '{m.group(1)}' in {l.table} table")
+        for m in re.finditer(r"-j\s+(\S+)", l.value):
+            tgt = m.group(1)
+            if tgt.upper() in _TARGET_KEYWORDS:
+                continue
+            if tgt not in defined.get(l.table, set()):
+                errs.append(f"Unknown target chain '{tgt}' in {l.table} table")
+        if errs:
+            issues.append(RuleIssue(
+                section=current_section, table=l.table, proto=l.proto,
+                text=l.value, errors=errs, warnings=[],
+            ))
+    return issues
 
 
 def validate_duplicate_sections(lines) -> list[str]:

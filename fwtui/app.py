@@ -193,6 +193,9 @@ class NavDataTable(DataTable):
 # rule editor modal (builder form + raw text)
 # ---------------------------------------------------------------------------
 
+# Sentinel for the "(custom dscp ...)" option in the mangle Action dropdown
+CUSTOM_DSCP = "__custom_dscp__"
+
 # Per-table option sets for the rule editor: each tab only offers the
 # chains / targets that are valid in the table it edits, so a mistake like
 # a filter rule with -A PREROUTING or -j DNAT is impossible from the form.
@@ -210,7 +213,9 @@ ACTIONS_BY_TABLE = {
     "nat": ["ACCEPT", "DROP", "reject(reset)", "reject(unreachable)",
             "reject(prohibited)", "log", "DNAT", "SNAT", "MASQUERADE"],
     "mangle": ["ACCEPT", "DROP", "reject(reset)", "reject(unreachable)",
-               "reject(prohibited)", "log"],
+               "reject(prohibited)", "log", "dscp(0x2e)", "dscp(0x10)",
+               "dscp(0x04)", "dscp(0x08)", "dscp(0x0c)", "dscp(0x2a)",
+               CUSTOM_DSCP],
 }
 
 # Source/Destination type selector: pick the kind first, then the value.
@@ -239,7 +244,12 @@ CUSTOM = "__custom__"
 
 def build_rule(chain: str, iface: str, src: str, dst: str, svc: str,
                action: str, to: str, extra: str,
-               logprefix: str = "") -> str:
+               logprefix: str = "",
+               limit: str = "", state: str = "",
+               time: str = "", recent: str = "",
+               mac: str = "", rpfilter: str = "",
+               lograte: str = "",
+               string: str = "", owner: str = "", frag: str = "") -> str:
     parts = [f"-A {chain}"]
     if iface:
         parts.append(f"-i {iface}")
@@ -257,6 +267,12 @@ def build_rule(chain: str, iface: str, src: str, dst: str, svc: str,
             parts.append(svc)  # multiport form, keep as-is
         else:
             parts.append(f"dservice({svc})")
+    # match clauses (limit/state/time/recent/mac/rpfilter/string/owner/frag)
+    # go in the body before -j
+    for clause in (limit, state, time, recent, mac, rpfilter,
+                   string, owner, frag):
+        if clause:
+            parts.append(clause)
     if action == "DNAT":
         parts.append("-j DNAT")
         if to:
@@ -268,9 +284,14 @@ def build_rule(chain: str, iface: str, src: str, dst: str, svc: str,
     elif action == "MASQUERADE":
         parts.append("-j MASQUERADE")
     elif action == "log":
-        parts.append(f"log({logprefix or 'firewall'})")
+        rate = f",{lograte}" if lograte else ""
+        parts.append(f"log({logprefix or 'firewall'}{rate})")
     elif action.startswith("reject("):
         parts.append(action)  # e.g. reject(unreachable)
+    elif action.startswith("dscp("):
+        # dscp(0x2e) -> -j DSCP --set-dscp 0x2e
+        val = action[action.index("(") + 1: -1]
+        parts.append(f"-j DSCP --set-dscp {val}")
     else:
         parts.append(f"-j {action}")
     if extra:
@@ -350,9 +371,19 @@ class RuleEditor(ModalScreen):
             return [("(none)", "")] + [(n, f"network({n})")
                                          for n in self.networks]
         if kind == "networkgroup":
-            return [("(none)", "")] + [(g, f"networkgroup({g})")
+            opts = [("(none)", "")] + [(g, f"networkgroup({g})")
                                          for g in self.networkgroups]
+            opts += self._country_options()
+            return opts
         return [("(any)", "")]
+
+    def _country_options(self) -> list:
+        """Predefined G_<CC> country networkgroups from the GeoLite2 MMDB,
+        read once per app session (via the app's cache) and cached. Returns
+        [] if geoip isn't configured or the helper/MMDB isn't available, so
+        the editor still works for db-defined groups."""
+        countries = self.app._country_list(self.db)
+        return [(cc, f"networkgroup(G_{cc})") for cc in countries]
 
     def _src_field(self, wid: str) -> Horizontal:
         """Two-step Source/Destination field: a type dropdown (any / host /
@@ -457,9 +488,13 @@ class RuleEditor(ModalScreen):
                                                     CHAINS_BY_TABLE["filter"])]
 
     def _actions(self) -> list[tuple[str, str]]:
-        """Targets valid in this editor's table (see ACTIONS_BY_TABLE)."""
-        return [(a, a) for a in ACTIONS_BY_TABLE.get(self.table,
-                                                     ACTIONS_BY_TABLE["filter"])]
+        """Targets valid in this editor's table (see ACTIONS_BY_TABLE). The
+        mangle '(custom dscp ...)' sentinel is shown as a labeled option."""
+        acts = ACTIONS_BY_TABLE.get(self.table, ACTIONS_BY_TABLE["filter"])
+        out = [(a, a) for a in acts if a != CUSTOM_DSCP]
+        if CUSTOM_DSCP in acts:
+            out.append(("(custom dscp ...)", CUSTOM_DSCP))
+        return out
 
     def compose(self) -> ComposeResult:
         yield Static("Rule editor", classes="modal-title")
@@ -499,6 +534,36 @@ class RuleEditor(ModalScreen):
                 yield self._row("Log prefix", Input(
                     placeholder="e.g. apache dropped", id="f-logprefix",
                     classes="finput -textual-compact"), classes="logrow")
+                yield self._row("Log rate", Input(
+                    placeholder="e.g. 10/min (optional)", id="f-lograte",
+                    classes="finput -textual-compact"), classes="logrow")
+                yield self._row("Rate limit", Input(
+                    placeholder="e.g. 10/min,5", id="f-limit",
+                    classes="finput -textual-compact"))
+                yield self._row("State", Input(
+                    placeholder="e.g. NEW,ESTABLISHED", id="f-state",
+                    classes="finput -textual-compact"))
+                yield self._row("Schedule", Input(
+                    placeholder="e.g. 08:00-18:00,Mon-Fri", id="f-time",
+                    classes="finput -textual-compact"))
+                yield self._row("Recent", Input(
+                    placeholder="set | check,60,5", id="f-recent",
+                    classes="finput -textual-compact"))
+                yield self._row("MAC", Input(
+                    placeholder="e.g. 00:11:22:33:44:55", id="f-mac",
+                    classes="finput -textual-compact"))
+                yield self._row("rpfilter", Input(
+                    placeholder="loose | strict | validmark", id="f-rpfilter",
+                    classes="finput -textual-compact"))
+                yield self._row("String", Input(
+                    placeholder="e.g. GET /admin", id="f-string",
+                    classes="finput -textual-compact"))
+                yield self._row("Owner", Input(
+                    placeholder="e.g. root or 0", id="f-owner",
+                    classes="finput -textual-compact"))
+                yield self._row("Frag", Input(
+                    placeholder="more | first", id="f-frag",
+                    classes="finput -textual-compact"))
                 yield self._row("Extra", Input(
                     placeholder="e.g. -m limit --limit 10/min", id="f-extra",
                     classes="finput -textual-compact"))
@@ -596,19 +661,35 @@ class RuleEditor(ModalScreen):
                 # saving an existing rule never drops a dservice() clause
                 self._set_select_value(self.query_one("#f-svc", Select),
                                        m.group(1))
+            # match clauses: limit/state/time/recent/mac/rpfilter/string/owner/frag
+            for func, wid in (("limit", "#f-limit"), ("state", "#f-state"),
+                              ("time", "#f-time"), ("recent", "#f-recent"),
+                              ("mac", "#f-mac"), ("rpfilter", "#f-rpfilter"),
+                              ("string", "#f-string"), ("owner", "#f-owner"),
+                              ("frag", "#f-frag")):
+                m = re.search(rf"{func}\(([^)]+)\)", raw)
+                if m:
+                    self.query_one(wid, Input).value = m.group(1)
             m = re.search(r"-j\s+(\S+)", raw)
             if m:
                 # keep custom targets (MARK, custom chains, ...) as options
                 self._set_select_value(self.query_one("#f-action", Select),
                                        m.group(1))
-            # function actions: reject(...) and log(prefix)
+            # function actions: reject(...), log(prefix[,rate]) and dscp(...)
             m = re.search(r"reject\((reset|unreachable|prohibited)\)", raw)
             if m:
                 self.query_one("#f-action", Select).value = f"reject({m.group(1)})"
             m = re.search(r"log\(([^)]*)\)", raw)
             if m:
                 self.query_one("#f-action", Select).value = "log"
-                self.query_one("#f-logprefix", Input).value = m.group(1).strip()
+                logargs = m.group(1).split(",")
+                self.query_one("#f-logprefix", Input).value = logargs[0].strip()
+                self.query_one("#f-lograte", Input).value = (
+                    logargs[1].strip() if len(logargs) > 1 else "")
+            m = re.search(r"-j DSCP --set-dscp\s+(\S+)", raw)
+            if m:
+                self._set_select_value(self.query_one("#f-action", Select),
+                                       f"dscp({m.group(1)})")
             m = re.search(r"--to-(?:destination|source)\s+(\S+)", raw)
             if m:
                 target = m.group(1)
@@ -635,13 +716,34 @@ class RuleEditor(ModalScreen):
         to = to_host + (f":{to_svc}" if to_svc else "")
         extra = self.query_one("#f-extra", Input).value
         logprefix = self.query_one("#f-logprefix", Input).value
+        lograte = self.query_one("#f-lograte", Input).value
+        limit = self._match_clause("f-limit", "limit")
+        state = self._match_clause("f-state", "state")
+        time = self._match_clause("f-time", "time")
+        recent = self._match_clause("f-recent", "recent")
+        mac = self._match_clause("f-mac", "mac")
+        rpfilter = self._match_clause("f-rpfilter", "rpfilter")
+        string = self._match_clause("f-string", "string")
+        owner = self._match_clause("f-owner", "owner")
+        frag = self._match_clause("f-frag", "frag")
         self.query_one("#f-raw", TextArea).text = build_rule(
-            chain, iface, src, dst, svc, action, to, extra, logprefix)
+            chain, iface, src, dst, svc, action, to, extra, logprefix,
+            limit, state, time, recent, mac, rpfilter, lograte,
+            string, owner, frag)
+
+    def _match_clause(self, wid: str, func: str) -> str:
+        """Wrap a match-clause field's value in its function form, or '' if
+        empty. e.g. '10/min,5' -> 'limit(10/min,5)'."""
+        val = self.query_one(f"#{wid}", Input).value.strip()
+        return f"{func}({val})" if val else ""
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if self._syncing:
             return
         if event.input.id in ("f-iface", "f-extra", "f-logprefix",
+                              "f-lograte", "f-limit", "f-state", "f-time",
+                              "f-recent", "f-mac", "f-rpfilter",
+                              "f-string", "f-owner", "f-frag",
                               "f-src-custom", "f-dst-custom"):
             self._rebuild_raw()
 
@@ -654,6 +756,9 @@ class RuleEditor(ModalScreen):
             # text with the sentinel (it still holds the previous value)
             self._open_custom_value(wid)
             return
+        if event.value == CUSTOM_DSCP and wid == "f-action":
+            self._open_custom_value("f-action")
+            return
         if wid in ("f-src-type", "f-dst-type"):
             self._on_src_type_changed(wid[:-5])  # strip the "-type" suffix
             return
@@ -664,12 +769,14 @@ class RuleEditor(ModalScreen):
             self._update_conditional_rows()
 
     def _open_custom_value(self, wid: str) -> None:
-        """'(custom ...)' picked in Iface/Service: prompt for a value."""
+        """'(custom ...)' picked in Iface/Service/Action: prompt for a value."""
         if wid == "f-iface":
             title, placeholder = "Interface value", "e.g. eth0, vlan10"
-        else:  # f-svc
+        elif wid == "f-svc":
             title, placeholder = ("Service value (db entry or raw name)",
                                   "e.g. ssh, https, or dservices(a,b)")
+        else:  # f-action (dscp)
+            title, placeholder = "DSCP value", "e.g. 0x2e"
         self.app.push_screen(
             Prompt(title, value=self._current_field_value(wid),
                    placeholder=placeholder),
@@ -682,6 +789,9 @@ class RuleEditor(ModalScreen):
         if wid == "f-svc":
             m = (re.search(r"dservices\(([^)]+)\)", raw)
                  or re.search(r"dservice\(([^)]+)\)", raw))
+        elif wid == "f-action":
+            m = re.search(r"dscp\(([^)]+)\)", raw)
+            return m.group(1) if m else ""
         else:  # f-iface
             m = re.search(r"-i\s+(\S+)", raw)
         return m.group(1) if m else ""
@@ -693,6 +803,8 @@ class RuleEditor(ModalScreen):
         if not value:
             self._set_select_value(sel, self._current_field_value(wid))
             return
+        if wid == "f-action":
+            value = f"dscp({value})"
         self._set_select_value(sel, value)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -728,7 +840,7 @@ class RuleEditor(ModalScreen):
         key = key.strip()
         value = value.strip()
         if section not in ("services", "hosts", "networks", "hostgroups",
-                           "networkgroups", "servicegroups"):
+                           "networkgroups", "servicegroups", "geoip"):
             self.notify(f"Unknown db section '{section}'", severity="error")
             return
         if not self.app._add_db_entry_direct(section, key, value):
@@ -874,7 +986,9 @@ class RuleEditor(ModalScreen):
     FIELD_IDS = ("f-proto", "f-chain", "f-iface", "f-src-type",
                  "f-src-val", "f-src-custom", "f-dst-type", "f-dst-val",
                  "f-dst-custom", "f-svc", "f-action", "f-to-host",
-                 "f-to-svc", "f-logprefix", "f-extra", "f-raw")
+                 "f-to-svc", "f-logprefix", "f-lograte", "f-limit",
+                 "f-state", "f-time", "f-recent", "f-mac", "f-rpfilter",
+                 "f-string", "f-owner", "f-frag", "f-extra", "f-raw")
 
     def _fields(self) -> list:
         return [self.query_one(f"#{wid}") for wid in self.FIELD_IDS
@@ -1828,6 +1942,8 @@ class FirewallApp(App):
         self.db = expand.Db()
         self.current_host: str | None = None
         self.current_dbsection: str | None = None
+        # G_<CC> country list from the GeoLite2 MMDB, loaded once per session
+        self._country_cache: list[str] | None = None
         self.rules_view: RulesView | None = None
         self.nat_view: RulesView | None = None
         self.mangle_view: RulesView | None = None
@@ -1950,6 +2066,31 @@ class FirewallApp(App):
                     self._load_with_includes(inc_path, out)
             else:
                 out.append(l)
+
+    def _country_list(self, db) -> list[str]:
+        """ISO country codes present in the GeoLite2 MMDB (IPv4), loaded once
+        per session and cached. Returns [] when geoip isn't configured or the
+        helper/MMDB isn't available."""
+        if self._country_cache is not None:
+            return self._country_cache
+        maxminddir = db.geoip.get("maxminddir", "")
+        if not maxminddir:
+            self._country_cache = []
+            return []
+        helper = os.path.join(self.firewall_type, "files", "geoip2cidr")
+        mmdb = os.path.join(maxminddir, "geolite2-country",
+                            "geolite2-country.mmdb")
+        if not os.path.exists(helper) or not os.path.exists(mmdb):
+            self._country_cache = []
+            return []
+        try:
+            out = subprocess.run([helper, "--countries", mmdb, "4"],
+                                 capture_output=True, text=True, timeout=60)
+            self._country_cache = (out.stdout.split()
+                                   if out.returncode == 0 else [])
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            self._country_cache = []
+        return self._country_cache
 
     def _load_ruleset(self, host: str) -> None:
         path = os.path.join(self.fwdir, host)
@@ -3215,6 +3356,7 @@ class FirewallApp(App):
             self.notify("Select a host ruleset to validate", severity="warning")
             return
         issues = expand.validate_rules(self.lines, self.db)
+        issues.extend(expand.validate_chains(self.lines))
         gerrs = expand.validate_globals(self.lines)
         if gerrs:
             issues.append(expand.RuleIssue("global", "", "", "", gerrs, []))

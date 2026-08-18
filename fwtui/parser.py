@@ -29,7 +29,7 @@ PROTO_SUFFIXES = ("", "4", "6", "46")
 # Sections recognized in the db file
 DB_SECTIONS = (
     "services", "servicegroups", "hosts", "hostgroups",
-    "networks", "networkgroups",
+    "networks", "networkgroups", "geoip",
 )
 
 
