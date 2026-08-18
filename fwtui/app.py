@@ -43,8 +43,8 @@ from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.css.query import NoMatches
 from textual.widgets import (
-    Button, DataTable, Footer, Header, Input, Label, ListItem, ListView,
-    Select, Static, TabbedContent, TabPane, TextArea,
+    Button, Checkbox, DataTable, Footer, Header, Input, Label, ListItem,
+    ListView, Select, Static, TabbedContent, TabPane, TextArea,
 )
 from textual.widgets._select import SelectOverlay
 from textual.widgets._tabbed_content import ContentTabs
@@ -255,21 +255,27 @@ SET_MATCH_RE = re.compile(
 
 PROTOS = [("both (46)", "46"), ("IPv4", "4"), ("IPv6", "6")]
 
+# Valid conntrack states for the state() match (multi-select in the editor)
+STATE_OPTIONS = ("NEW", "ESTABLISHED", "RELATED", "INVALID", "UNTRACKED")
+# frag() has exactly two options
+FRAG_OPTIONS = [("(none)", ""), ("more", "more"), ("first", "first")]
+
 # Sentinel value for the "(custom ...)" option in the Source/Dest dropdowns
 CUSTOM = "__custom__"
 
 
-def build_rule(chain: str, iface: str, src: str, dst: str, svc: str,
-               action: str, to: str, extra: str,
+def build_rule(chain: str, iface: str, src: str, dst: str, sport: str,
+               svc: str, action: str, to: str, extra: str,
                logprefix: str = "",
                limit: str = "", state: str = "",
                time: str = "", recent: str = "",
                mac: str = "", rpfilter: str = "",
                lograte: str = "",
-               string: str = "", owner: str = "", frag: str = "") -> str:
+               string: str = "", owner: str = "", frag: str = "",
+               iface_dir: str = "-i") -> str:
     parts = [f"-A {chain}"]
     if iface:
-        parts.append(f"-i {iface}")
+        parts.append(f"{iface_dir} {iface}")
     for val, flag in ((src, "-s"), (dst, "-d")):
         if not val:
             continue
@@ -279,6 +285,8 @@ def build_rule(chain: str, iface: str, src: str, dst: str, svc: str,
             parts.append(val)
         else:
             parts.append(f"{flag} {val}")
+    if sport:
+        parts.append(f"--sport {sport}")
     if svc:
         if svc.startswith("dservices("):
             parts.append(svc)  # multiport form, keep as-is
@@ -364,18 +372,22 @@ class RuleEditor(ModalScreen):
                    "PREROUTING, POSTROUTING).",
         "f-iface": "The network interface on the firewall the rule applies "
                     "to (-i/-o), e.g. eth0, vlan10.",
+        "f-iface-dir": "Interface direction: -i (input) or -o (output). "
+                        "Only shown for FORWARD, where both apply.",
         "f-src": "Source address: a host, hostgroup, network, networkgroup, "
                   "dns name, or a raw IP/address.",
         "f-dst": "Destination address: a host, hostgroup, network, "
                   "networkgroup, dns name, or a raw IP/address.",
+        "f-sport": "Source port (--sport), e.g. 1024. Rarely needed; most "
+                    "rules match only the destination port.",
         "f-svc": "Destination port/service (--dport). Pick a db service or "
                   "enter a custom port.",
         "f-proto": "IP protocol: tcp, udp, icmp, icmpv6, or all.",
         "f-limit": "Rate limit: limit(rate[,burst]), e.g. 10/min,5. Limits "
                     "how often the rule matches.",
-        "f-state": "Connection state: state(NEW,ESTABLISHED). Matches "
-                    "conntrack states (NEW, ESTABLISHED, RELATED, INVALID, "
-                    "UNTRACKED).",
+        "f-state": "Connection state: state(NEW,ESTABLISHED). Tick the "
+                    "conntrack states to match (NEW, ESTABLISHED, RELATED, "
+                    "INVALID, UNTRACKED).",
         "f-time": "Time window: time(start-stop[,weekdays]), e.g. "
                    "08:00-18:00,Mon-Fri.",
         "f-recent": "Recent (fail2ban-style): recent(set|check[,seconds[,hitcount]]). "
@@ -408,11 +420,15 @@ class RuleEditor(ModalScreen):
         if f is None:
             return None
         # source/dest are composite (type + value + custom); map any of their
-        # sub-fields to the same help
+        # sub-fields to the same help. State is a row of checkboxes.
         help_id = {"f-src-type": "f-src", "f-src-val": "f-src",
                    "f-src-custom": "f-src", "f-dst-type": "f-dst",
-                   "f-dst-val": "f-dst", "f-dst-custom": "f-dst"}.get(
-                       f.id, f.id)
+                   "f-dst-val": "f-dst", "f-dst-custom": "f-dst",
+                   "f-state-new": "f-state",
+                   "f-state-established": "f-state",
+                   "f-state-related": "f-state",
+                   "f-state-invalid": "f-state",
+                   "f-state-untracked": "f-state"}.get(f.id, f.id)
         label = {"f-src": "Source", "f-dst": "Destination"}.get(help_id)
         if label is None:
             # find the row label for this field id
@@ -612,6 +628,19 @@ class RuleEditor(ModalScreen):
             out.append(("(custom dscp ...)", CUSTOM_DSCP))
         return out
 
+    def _state_field(self) -> Horizontal:
+        """A row of compact checkboxes for the conntrack state match."""
+        return Horizontal(
+            *(Checkbox(s, id=f"f-state-{s.lower()}", compact=True)
+              for s in STATE_OPTIONS),
+            classes="state-row")
+
+    def _state_value(self) -> str:
+        """Comma-separated selected states, or '' if none."""
+        return ",".join(
+            s for s in STATE_OPTIONS
+            if self.query_one(f"#f-state-{s.lower()}", Checkbox).value)
+
     def compose(self) -> ComposeResult:
         yield Static("Rule editor", classes="modal-title")
         with Horizontal(id="editor-body"):
@@ -619,14 +648,22 @@ class RuleEditor(ModalScreen):
                 yield self._row("Chain", NavSelect(
                     self._chains(), id="f-chain",
                     classes="fselect -textual-compact", allow_blank=False))
-                yield self._row("Interface",
-                    NavSelect(self._iface_options(), value="", id="f-iface",
-                              classes="fselect -textual-compact",
-                              allow_blank=False)
-                    if self.ifaces else Input(
-                        placeholder="e.g. eth0, vlan10", id="f-iface",
-                        classes="finput -textual-compact"))
+                yield self._row("Interface", Horizontal(
+                    NavSelect([("-i", "-i"), ("-o", "-o")], value="-i",
+                              id="f-iface-dir",
+                              classes="fselect iface-dir -textual-compact",
+                              allow_blank=False),
+                    (NavSelect(self._iface_options(), value="", id="f-iface",
+                               classes="fselect -textual-compact",
+                               allow_blank=False)
+                     if self.ifaces else Input(
+                         placeholder="e.g. eth0, vlan10", id="f-iface",
+                         classes="finput -textual-compact")),
+                    classes="iface-row"))
                 yield self._row("Source", self._src_field("f-src"))
+                yield self._row("Source port", Input(
+                    placeholder="e.g. 1024", id="f-sport",
+                    classes="finput -textual-compact"))
                 yield self._row("Destination", self._src_field("f-dst"))
                 yield self._row("Service", NavSelect(
                     self._service_options(), value="", id="f-svc",
@@ -637,9 +674,7 @@ class RuleEditor(ModalScreen):
                 yield self._row("Rate limit", Input(
                     placeholder="e.g. 10/min,5", id="f-limit",
                     classes="finput -textual-compact"))
-                yield self._row("State", Input(
-                    placeholder="e.g. NEW,ESTABLISHED", id="f-state",
-                    classes="finput -textual-compact"))
+                yield self._row("State", self._state_field())
                 yield self._row("Schedule", Input(
                     placeholder="e.g. 08:00-18:00,Mon-Fri", id="f-time",
                     classes="finput -textual-compact"))
@@ -649,18 +684,18 @@ class RuleEditor(ModalScreen):
                 yield self._row("MAC", Input(
                     placeholder="e.g. 00:11:22:33:44:55", id="f-mac",
                     classes="finput -textual-compact"))
-                yield self._row("rpfilter", Input(
+                yield self._row("RP filter", Input(
                     placeholder="loose | strict | validmark", id="f-rpfilter",
                     classes="finput -textual-compact"))
-                yield self._row("String", Input(
+                yield self._row("Match content", Input(
                     placeholder="e.g. GET /admin", id="f-string",
                     classes="finput -textual-compact"))
-                yield self._row("Owner", Input(
+                yield self._row("User", Input(
                     placeholder="e.g. root or 0", id="f-owner",
-                    classes="finput -textual-compact"))
-                yield self._row("Frag", Input(
-                    placeholder="more | first", id="f-frag",
-                    classes="finput -textual-compact"))
+                    classes="finput -textual-compact"), classes="ownerrow")
+                yield self._row("Fragmentation", NavSelect(
+                    FRAG_OPTIONS, value="", id="f-frag",
+                    classes="fselect -textual-compact", allow_blank=False))
                 yield self._row("Action", NavSelect(
                     self._actions(), value="ACCEPT", id="f-action",
                     classes="fselect -textual-compact", allow_blank=False))
@@ -683,10 +718,6 @@ class RuleEditor(ModalScreen):
                 yield self._row("Extra", Input(
                     placeholder="e.g. -m limit --limit 10/min", id="f-extra",
                     classes="finput -textual-compact"))
-                yield Label(
-                    "Source/Destination: pick a type, then a value "
-                    "(custom = raw IP/address). Service: pick a db entry or "
-                    "'(custom ...)'", classes="fhint")
             with Vertical(id="rawcol"):
                 yield Label("Raw rule text (authoritative)", classes="frow")
                 yield TextArea(self.text, id="f-raw")
@@ -719,8 +750,10 @@ class RuleEditor(ModalScreen):
         self._sync_timer = self.set_timer(0.5, self._sync_from_raw)
 
     def _update_conditional_rows(self) -> None:
-        """Show the To host/To svc rows only for DNAT/SNAT, and the Log
-        prefix row only for the log action."""
+        """Show/hide rows that depend on the current action/chain:
+        To host/To svc only for DNAT/SNAT, Log prefix/rate only for log,
+        User (owner) only for OUTPUT, and the interface direction selector
+        only for FORWARD."""
         action = self.query_one("#f-action", Select).value
         show_nat = action in ("DNAT", "SNAT")
         for row in self.query(".natrow"):
@@ -728,6 +761,11 @@ class RuleEditor(ModalScreen):
         show_log = action == "log"
         for row in self.query(".logrow"):
             row.set_class(show_log, "-show")
+        chain = self.query_one("#f-chain", Select).value
+        for row in self.query(".ownerrow"):
+            row.set_class(chain == "OUTPUT", "-show")
+        for row in self.query(".iface-dir"):
+            row.set_class(chain == "FORWARD", "-show")
 
     def _sync_from_raw(self) -> None:
         self._syncing = True
@@ -739,18 +777,23 @@ class RuleEditor(ModalScreen):
                 # keep custom chains (user-defined, SECMARK, ...) as options
                 self._set_select_value(self.query_one("#f-chain", Select),
                                        m.group(1))
-            for flag, wid in (("-i", "#f-iface"), ("-s", "#f-src"),
-                              ("-d", "#f-dst")):
+            for flag, wid in (("-i", "#f-iface"), ("-o", "#f-iface"),
+                              ("-s", "#f-src"), ("-d", "#f-dst")):
                 m = re.search(rf"{flag}\s+(\S+)", raw)
                 if m:
                     if wid in ("#f-src", "#f-dst"):
                         self._set_src_value(wid, m.group(1))
                     else:
+                        # interface: set the direction and the value
+                        self.query_one("#f-iface-dir", Select).value = flag
                         w = self.query_one(wid)
                         if isinstance(w, Input):
                             w.value = m.group(1)
                         else:
                             self._set_select_value(w, m.group(1))
+            m = re.search(r"--sport\s+(\S+)", raw)
+            if m:
+                self.query_one("#f-sport", Input).value = m.group(1)
             # ipset set-match sources/destinations appear in the rule body
             # as 'func(x) src' / 'func(x) dst' (no -s/-d prefix)
             for func, direction, wid in (
@@ -777,15 +820,28 @@ class RuleEditor(ModalScreen):
                 # saving an existing rule never drops a dservice() clause
                 self._set_select_value(self.query_one("#f-svc", Select),
                                        m.group(1))
-            # match clauses: limit/state/time/recent/mac/rpfilter/string/owner/frag
-            for func, wid in (("limit", "#f-limit"), ("state", "#f-state"),
-                              ("time", "#f-time"), ("recent", "#f-recent"),
-                              ("mac", "#f-mac"), ("rpfilter", "#f-rpfilter"),
-                              ("string", "#f-string"), ("owner", "#f-owner"),
-                              ("frag", "#f-frag")):
+            # match clauses: limit/time/recent/mac/rpfilter/string/owner
+            # (state and frag are handled separately: multi-select / dropdown)
+            for func, wid in (("limit", "#f-limit"), ("time", "#f-time"),
+                              ("recent", "#f-recent"), ("mac", "#f-mac"),
+                              ("rpfilter", "#f-rpfilter"),
+                              ("string", "#f-string"),
+                              ("owner", "#f-owner")):
                 m = re.search(rf"{func}\(([^)]+)\)", raw)
                 if m:
                     self.query_one(wid, Input).value = m.group(1)
+            # state: set the checkboxes from the comma-separated list
+            m = re.search(r"state\(([^)]+)\)", raw)
+            if m:
+                states = {s.strip().upper()
+                          for s in m.group(1).split(",")}
+                for s in STATE_OPTIONS:
+                    self.query_one(f"#f-state-{s.lower()}",
+                                   Checkbox).value = s in states
+            # frag: dropdown
+            m = re.search(r"frag\(([^)]+)\)", raw)
+            if m:
+                self.query_one("#f-frag", Select).value = m.group(1)
             m = re.search(r"-j\s+(\S+)", raw)
             if m:
                 # keep custom targets (MARK, custom chains, ...) as options
@@ -823,8 +879,10 @@ class RuleEditor(ModalScreen):
     def _rebuild_raw(self) -> None:
         chain = self.query_one("#f-chain", Select).value or "INPUT"
         iface = self.query_one("#f-iface").value  # Input or Select
+        iface_dir = self.query_one("#f-iface-dir", Select).value or "-i"
         src = self._src_raw_value("f-src")
         dst = self._src_raw_value("f-dst")
+        sport = self.query_one("#f-sport", Input).value.strip()
         svc = self.query_one("#f-svc", Select).value or ""
         action = self.query_one("#f-action", Select).value or "ACCEPT"
         to_host = self.query_one("#f-to-host", Select).value or ""
@@ -834,18 +892,20 @@ class RuleEditor(ModalScreen):
         logprefix = self.query_one("#f-logprefix", Input).value
         lograte = self.query_one("#f-lograte", Input).value
         limit = self._match_clause("f-limit", "limit")
-        state = self._match_clause("f-state", "state")
+        state = self._state_value()
+        state = f"state({state})" if state else ""
         time = self._match_clause("f-time", "time")
         recent = self._match_clause("f-recent", "recent")
         mac = self._match_clause("f-mac", "mac")
         rpfilter = self._match_clause("f-rpfilter", "rpfilter")
         string = self._match_clause("f-string", "string")
         owner = self._match_clause("f-owner", "owner")
-        frag = self._match_clause("f-frag", "frag")
+        frag = self.query_one("#f-frag", Select).value
+        frag = f"frag({frag})" if frag else ""
         self.query_one("#f-raw", TextArea).text = build_rule(
-            chain, iface, src, dst, svc, action, to, extra, logprefix,
+            chain, iface, src, dst, sport, svc, action, to, extra, logprefix,
             limit, state, time, recent, mac, rpfilter, lograte,
-            string, owner, frag)
+            string, owner, frag, iface_dir)
 
     def _match_clause(self, wid: str, func: str) -> str:
         """Wrap a match-clause field's value in its function form, or '' if
@@ -856,11 +916,17 @@ class RuleEditor(ModalScreen):
     def on_input_changed(self, event: Input.Changed) -> None:
         if self._syncing:
             return
-        if event.input.id in ("f-iface", "f-extra", "f-logprefix",
-                              "f-lograte", "f-limit", "f-state", "f-time",
-                              "f-recent", "f-mac", "f-rpfilter",
-                              "f-string", "f-owner", "f-frag",
+        if event.input.id in ("f-iface", "f-sport", "f-extra",
+                              "f-logprefix", "f-lograte", "f-limit",
+                              "f-time", "f-recent", "f-mac",
+                              "f-rpfilter", "f-string", "f-owner",
                               "f-src-custom", "f-dst-custom"):
+            self._rebuild_raw()
+
+    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
+        if self._syncing:
+            return
+        if event.checkbox.id and event.checkbox.id.startswith("f-state-"):
             self._rebuild_raw()
 
     def on_select_changed(self, event: Select.Changed) -> None:
@@ -879,9 +945,10 @@ class RuleEditor(ModalScreen):
             self._on_src_type_changed(wid[:-5])  # strip the "-type" suffix
             return
         if wid in ("f-chain", "f-action", "f-svc", "f-to-host",
-                   "f-to-svc", "f-src-val", "f-dst-val", "f-iface"):
+                   "f-to-svc", "f-src-val", "f-dst-val", "f-iface",
+                   "f-iface-dir", "f-frag"):
             self._rebuild_raw()
-        if wid == "f-action":
+        if wid in ("f-action", "f-chain"):
             self._update_conditional_rows()
 
     def _open_custom_value(self, wid: str) -> None:
@@ -909,7 +976,7 @@ class RuleEditor(ModalScreen):
             m = re.search(r"dscp\(([^)]+)\)", raw)
             return m.group(1) if m else ""
         else:  # f-iface
-            m = re.search(r"-i\s+(\S+)", raw)
+            m = re.search(r"-[io]\s+(\S+)", raw)
         return m.group(1) if m else ""
 
     def _on_custom_value(self, wid: str, res) -> None:
@@ -1099,10 +1166,12 @@ class RuleEditor(ModalScreen):
         return ("services", svc)
 
     # -- form navigation ----------------------------------------------------
-    FIELD_IDS = ("f-chain", "f-iface", "f-src-type", "f-src-val",
-                 "f-src-custom", "f-dst-type", "f-dst-val",
-                 "f-dst-custom", "f-svc", "f-proto", "f-limit",
-                 "f-state", "f-time", "f-recent", "f-mac", "f-rpfilter",
+    FIELD_IDS = ("f-chain", "f-iface-dir", "f-iface", "f-src-type",
+                 "f-src-val", "f-src-custom", "f-sport", "f-dst-type",
+                 "f-dst-val", "f-dst-custom", "f-svc", "f-proto",
+                 "f-limit", "f-state-new", "f-state-established",
+                 "f-state-related", "f-state-invalid", "f-state-untracked",
+                 "f-time", "f-recent", "f-mac", "f-rpfilter",
                  "f-string", "f-owner", "f-frag", "f-action",
                  "f-to-host", "f-to-svc", "f-logprefix", "f-lograte",
                  "f-extra", "f-raw")
@@ -2064,6 +2133,12 @@ class FirewallApp(App):
     .natrow.-show { display: block; }
     .logrow { display: none; }
     .logrow.-show { display: block; }
+    .ownerrow { display: none; }
+    .ownerrow.-show { display: block; }
+    .iface-dir { display: none; width: 6; }
+    .iface-dir.-show { display: block; }
+    .state-row { width: 1fr; }
+    .state-row Checkbox { margin: 0 1 0 0; }
     .flabel { width: 22; padding: 0 1 0 0; }
     .fselect { width: 1fr; }
     .finput { width: 1fr; }
