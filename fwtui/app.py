@@ -38,7 +38,7 @@ from rich.markup import escape
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.widgets import (
@@ -1383,10 +1383,13 @@ class ConfirmQuit(ModalScreen):
 # ---------------------------------------------------------------------------
 
 class HelpPopup(ModalScreen):
-    """Lists the key bindings that are currently available (the '?' help)."""
+    """Lists the key bindings that are currently available (the '?' help),
+    split into keys that work everywhere and keys that are context specific."""
 
     CSS = """
-    HelpPopup #help-list { height: 24; }
+    HelpPopup #help-scroll { height: 24; }
+    HelpPopup .help-group { text-style: bold; color: $accent; }
+    HelpPopup .help-row { padding: 0 1; }
     """
 
     BINDINGS = [
@@ -1395,16 +1398,18 @@ class HelpPopup(ModalScreen):
         Binding("?", "close", "Close", show=False),
     ]
 
-    def __init__(self, bindings: list[tuple[str, str]]) -> None:
+    def __init__(self, groups: list[tuple[str, list[tuple[str, str]]]]) -> None:
         super().__init__()
-        self.bindings = bindings
+        self.groups = groups
 
     def compose(self) -> ComposeResult:
-        yield Static(f"Available key bindings ({len(self.bindings)})",
-                     classes="modal-title")
-        items = [ListItem(Label(f"  {key:<14}{desc}"))
-                 for key, desc in self.bindings]
-        yield ListView(*items, id="help-list")
+        n = sum(len(items) for _, items in self.groups)
+        yield Static(f"Available key bindings ({n})", classes="modal-title")
+        with VerticalScroll(id="help-scroll"):
+            for title, items in self.groups:
+                yield Static(f"  {title}", classes="help-group")
+                for key, desc in items:
+                    yield Static(f"    {key:<14}{desc}", classes="help-row")
         with Horizontal(id="modal-buttons"):
             yield Button("Close", id="btn-close")
 
@@ -2455,12 +2460,23 @@ class FirewallApp(App):
             self.exit()
 
     def action_help(self) -> None:
-        """? : pop up the list of currently-available key bindings."""
-        shown: set[tuple[str, str]] = set()
+        """? : pop up the list of currently-available key bindings, split into
+        keys that work everywhere and keys that depend on the current context."""
+        # actions that are meaningful on every screen (whenever applicable)
+        universal = {"help", "quit", "undo", "save", "validate", "preview",
+                     "deploy", "git", "edit"}
+        everywhere: list[tuple[str, str]] = []
+        context: list[tuple[str, str]] = []
         for _key, (_ns, binding, enabled, _tooltip) in self.active_bindings.items():
             if binding.show and binding.description and enabled:
-                shown.add((self.get_key_display(binding), binding.description))
-        self.push_screen(HelpPopup(sorted(shown)))
+                item = (self.get_key_display(binding), binding.description)
+                (everywhere if binding.action in universal else context).append(item)
+        groups: list[tuple[str, list[tuple[str, str]]]] = []
+        if everywhere:
+            groups.append(("Everywhere", sorted(everywhere)))
+        if context:
+            groups.append(("Context specific", sorted(context)))
+        self.push_screen(HelpPopup(groups))
 
     def _on_quit_confirm(self, result) -> None:
         if result:
