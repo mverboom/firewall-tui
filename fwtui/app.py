@@ -315,6 +315,19 @@ def build_rule(chain: str, iface: str, src: str, dst: str, svc: str,
     return " ".join(parts)
 
 
+class FieldScroll(VerticalScroll, inherit_bindings=False):
+    """VerticalScroll for the rule editor's field list. Up/down are left to
+    bubble to the editor's field navigation (which auto-scrolls the focused
+    field into view); page/home/end still scroll the list manually."""
+
+    BINDINGS = [
+        Binding("pageup", "page_up", "Page up", show=False),
+        Binding("pagedown", "page_down", "Page down", show=False),
+        Binding("home", "scroll_home", "Top", show=False),
+        Binding("end", "scroll_end", "Bottom", show=False),
+    ]
+
+
 class RuleEditor(ModalScreen):
     """Modal to add/edit a rule. Builder fields feed a live raw preview;
     the raw text is authoritative on save."""
@@ -525,8 +538,8 @@ class RuleEditor(ModalScreen):
 
     def compose(self) -> ComposeResult:
         yield Static("Rule editor", classes="modal-title")
-        with Horizontal():
-            with Vertical(id="builder"):
+        with Horizontal(id="editor-body"):
+            with FieldScroll(id="builder"):
                 yield self._row("Proto", NavSelect(
                     PROTOS, value=self.proto, id="f-proto",
                     classes="fselect -textual-compact", allow_blank=False))
@@ -1964,10 +1977,11 @@ class FirewallApp(App):
         text-opacity: 0.4;
     }
     .field { margin: 0 1 1 1; }
-    #builder { width: 55%; }
-    #rawcol { width: 45%; }
-    .frow { height: 1; margin: 0 0 1 1; }
-    .fhint { margin: 0 0 1 1; text-style: dim; }
+    #editor-body { height: 1fr; }
+    #builder { width: 55%; height: 1fr; }
+    #rawcol { width: 45%; height: 1fr; }
+    .frow { height: 1; margin: 0 0 0 1; }
+    .fhint { margin: 0 0 0 1; text-style: dim; }
     .natrow { display: none; }
     .natrow.-show { display: block; }
     .logrow { display: none; }
@@ -1978,7 +1992,7 @@ class FirewallApp(App):
     .fbox { width: 1fr; }
     .src-type { width: 13; }
     .src-val, .src-custom { width: 1fr; }
-    #rawcol TextArea { height: 12; }
+    #rawcol TextArea { height: 1fr; }
     #modal-buttons { height: 2; align-horizontal: left; align-vertical: middle; padding: 0 1; }
     #modal-buttons Button { margin: 0 1 0 0; }
     .modal-title { padding: 1; text-style: bold; }
