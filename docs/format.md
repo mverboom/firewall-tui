@@ -59,10 +59,11 @@ mangle=-A PREROUTING -j CONNMARK --restore-mark
 [geoip]           maxminddir=/path/to/maxminddbs   (config directive)
 ```
 
-- `[geoip] maxminddir` points to a directory of MaxMind GeoLite2 MMDB files
-  (the type reads `<maxminddir>/geolite2-country/geolite2-country.mmdb`). It is
-  a config directive, not a data section. Requires the `python3-maxminddb`
-  package on the cdist server.
+- `[geoip] maxminddir` points to a directory of MaxMind GeoLite2 MMDB files.
+  It is a config directive, not a data section. Country data is **pre-generated**
+  by the download script (`geoip2.sh`) into per-country CIDR files under
+  `<maxminddir>/countries/<CC>` (IPv4) and `<CC>6` (IPv6); the manifest and TUI
+  read those, so deploys do not re-scan the MMDB.
 
 - Values may start with `@` to execute a command and use its output
   (e.g. `test2=@echo "shell,proxy"`).

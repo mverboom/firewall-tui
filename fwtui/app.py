@@ -2068,28 +2068,21 @@ class FirewallApp(App):
                 out.append(l)
 
     def _country_list(self, db) -> list[str]:
-        """ISO country codes present in the GeoLite2 MMDB (IPv4), loaded once
-        per session and cached. Returns [] when geoip isn't configured or the
-        helper/MMDB isn't available."""
+        """ISO country codes available for geo blocking, read from the
+        pre-generated per-country files under <maxminddir>/countries (IPv4).
+        Loaded once per session and cached; returns [] when geoip isn't
+        configured or no country data has been generated."""
         if self._country_cache is not None:
             return self._country_cache
         maxminddir = db.geoip.get("maxminddir", "")
-        if not maxminddir:
+        cdir = os.path.join(maxminddir, "countries") if maxminddir else ""
+        if not cdir or not os.path.isdir(cdir):
             self._country_cache = []
             return []
-        helper = os.path.join(self.firewall_type, "files", "geoip2cidr")
-        mmdb = os.path.join(maxminddir, "geolite2-country",
-                            "geolite2-country.mmdb")
-        if not os.path.exists(helper) or not os.path.exists(mmdb):
-            self._country_cache = []
-            return []
-        try:
-            out = subprocess.run([helper, "--countries", mmdb, "4"],
-                                 capture_output=True, text=True, timeout=60)
-            self._country_cache = (out.stdout.split()
-                                   if out.returncode == 0 else [])
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            self._country_cache = []
+        # v4 files are named <CC> (2 letters); IPv6 counterparts are <CC>6
+        self._country_cache = sorted(
+            f for f in os.listdir(cdir)
+            if not f.endswith("6") and os.path.isfile(os.path.join(cdir, f)))
         return self._country_cache
 
     def _load_ruleset(self, host: str) -> None:

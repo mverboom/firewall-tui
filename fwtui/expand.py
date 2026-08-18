@@ -8,6 +8,7 @@ aborting, so the TUI can show them inline.
 from __future__ import annotations
 
 import ipaddress
+import os
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -426,18 +427,25 @@ def _netlookup(name: str, db: Db, proto: int, errs: list[str],
 
 
 def _resolve_country(db: Db, name: str, errs: list[str]) -> bool:
-    """Validate a predefined country group G_<CC> (resolved from the GeoLite2
-    MMDB at deploy time). Requires [geoip] maxminddir in the db. Does not read
-    the MMDB here (slow); the manifest catches a missing country at deploy."""
+    """Validate a predefined country group G_<CC> (resolved from the
+    pre-generated per-country files under <maxminddir>/countries, written by
+    the geoip2.sh download script). Requires [geoip] maxminddir in the db and
+    that the country's data file exists."""
     if not name.startswith("G_"):
         errs.append(f"Networkgroup member '{name}' is not a network, group or country")
         return False
     cc = name[2:]
-    if not db.geoip.get("maxminddir"):
-        errs.append(f"geoip: country '{cc}' used but [geoip] maxminddir is not set in the db")
-        return False
     if not re.fullmatch(r"[A-Z]{2}", cc):
         errs.append(f"geoip: '{cc}' is not a 2-letter country code")
+        return False
+    maxminddir = db.geoip.get("maxminddir", "")
+    if not maxminddir:
+        errs.append(f"geoip: country '{cc}' used but [geoip] maxminddir is not set in the db")
+        return False
+    cdir = os.path.join(maxminddir, "countries")
+    if not os.path.isfile(os.path.join(cdir, cc)):
+        errs.append(f"geoip: country '{cc}' data not found at "
+                    f"'{os.path.join(cdir, cc)}' (run geoip2.sh to generate it)")
         return False
     return True
 

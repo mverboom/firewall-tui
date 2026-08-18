@@ -52,7 +52,8 @@ Documentation:
   set-match types (hostgroup / networkgroup / dns) are emitted in the rule
   body as `func(x) src` / `func(x) dst` rather than behind a `-s`/`-d` flag
   (the manifest rejects the latter). The networkgroup dropdown also lists
-  predefined `G_<CC>` country groups (geo blocking) from the `[geoip]` MMDB
+  predefined `G_<CC>` country groups (geo blocking) from the `[geoip]`
+  pre-generated country files
   when configured. The Service
   dropdown shows each service's port/proto next to its name (e.g.
   `ssh (22/tcp)`) and type-to-search matches on it. `w` on a db field
