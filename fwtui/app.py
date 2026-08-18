@@ -384,10 +384,12 @@ class RuleEditor(ModalScreen):
                   "dns name, or a raw IP/address.",
         "f-dst": "Destination address: a host, hostgroup, network, "
                   "networkgroup, dns name, or a raw IP/address.",
-        "f-sport": "Source port (--sport), e.g. 1024. Rarely needed; most "
-                    "rules match only the destination port.",
-        "f-svc": "Destination port/service (--dport). Pick a db service or "
-                  "enter a custom port.",
+        "f-sport": "Source port (--sport). Pick a db service's port or "
+                    "enter a custom port/range, e.g. 1024 or 1000:2000. "
+                    "Rarely needed; most rules match only the destination "
+                    "port.",
+        "f-svc": "Destination port (--dport). Pick a db service or enter "
+                  "a custom port.",
         "f-proto": "IP protocol: tcp, udp, icmp, icmpv6, or all.",
         "f-limit": "Rate limit: limit(rate[,burst]), e.g. 10/min,5. Limits "
                     "how often the rule matches.",
@@ -468,6 +470,20 @@ class RuleEditor(ModalScreen):
 
     def _iface_options(self) -> list:
         opts = [("(any)", "")] + [(i, i) for i in self.ifaces]
+        opts.append(("(custom ...)", CUSTOM))
+        return opts
+
+    def _sport_options(self) -> list:
+        """Source port dropdown: offer each db service's port (e.g.
+        'ssh (22/tcp)' -> value '22') so a source port can be picked from
+        the services list. The value is the raw port/range used in --sport;
+        services without a numeric port (icmp) are skipped."""
+        opts = [("(none)", "")]
+        for s in self.services:
+            val = self.db.services.get(s, "")
+            port = val.split("/", 1)[0] if "/" in val else ""
+            if re.fullmatch(r"\d+(?::\d+)?", port):
+                opts.append((f"{s} ({val})", port))
         opts.append(("(custom ...)", CUSTOM))
         return opts
 
@@ -668,11 +684,11 @@ class RuleEditor(ModalScreen):
                          classes="finput -textual-compact")),
                     classes="iface-row"))
                 yield self._row("Source", self._src_field("f-src"))
-                yield self._row("Source port", Input(
-                    placeholder="e.g. 1024", id="f-sport",
-                    classes="finput -textual-compact"))
+                yield self._row("Source port", NavSelect(
+                    self._sport_options(), value="", id="f-sport",
+                    classes="fselect -textual-compact", allow_blank=False))
                 yield self._row("Destination", self._src_field("f-dst"))
-                yield self._row("Service", NavSelect(
+                yield self._row("Destination port", NavSelect(
                     self._service_options(), value="", id="f-svc",
                     classes="fselect -textual-compact", allow_blank=False))
                 yield self._row("Proto", NavSelect(
@@ -801,7 +817,8 @@ class RuleEditor(ModalScreen):
                             self._set_select_value(w, m.group(1))
             m = re.search(r"--sport\s+(\S+)", raw)
             if m:
-                self.query_one("#f-sport", Input).value = m.group(1)
+                self._set_select_value(self.query_one("#f-sport", Select),
+                                       m.group(1))
             # ipset set-match sources/destinations appear in the rule body
             # as 'func(x) src' / 'func(x) dst' (no -s/-d prefix)
             for func, direction, wid in (
@@ -891,7 +908,7 @@ class RuleEditor(ModalScreen):
         iface_dir = self.query_one("#f-iface-dir", Select).value or "-i"
         src = self._src_raw_value("f-src")
         dst = self._src_raw_value("f-dst")
-        sport = self.query_one("#f-sport", Input).value.strip()
+        sport = self.query_one("#f-sport", Select).value or ""
         svc = self.query_one("#f-svc", Select).value or ""
         action = self.query_one("#f-action", Select).value or "ACCEPT"
         to_host = self.query_one("#f-to-host", Select).value or ""
@@ -926,7 +943,7 @@ class RuleEditor(ModalScreen):
     def on_input_changed(self, event: Input.Changed) -> None:
         if self._syncing:
             return
-        if event.input.id in ("f-iface", "f-sport", "f-extra",
+        if event.input.id in ("f-iface", "f-extra",
                               "f-logprefix", "f-lograte", "f-limit",
                               "f-time", "f-recent", "f-mac",
                               "f-string", "f-owner",
@@ -937,7 +954,7 @@ class RuleEditor(ModalScreen):
         if self._syncing:
             return
         wid = event.select.id
-        if event.value == CUSTOM and wid in ("f-iface", "f-svc"):
+        if event.value == CUSTOM and wid in ("f-iface", "f-svc", "f-sport"):
             # "(custom ...)": ask for a raw value; do NOT rebuild the raw
             # text with the sentinel (it still holds the previous value)
             self._open_custom_value(wid)
@@ -948,9 +965,9 @@ class RuleEditor(ModalScreen):
         if wid in ("f-src-type", "f-dst-type"):
             self._on_src_type_changed(wid[:-5])  # strip the "-type" suffix
             return
-        if wid in ("f-chain", "f-action", "f-svc", "f-to-host",
-                   "f-to-svc", "f-src-val", "f-dst-val", "f-iface",
-                   "f-iface-dir", "f-frag", "f-rpfilter"):
+        if wid in ("f-chain", "f-action", "f-svc", "f-sport",
+                   "f-to-host", "f-to-svc", "f-src-val", "f-dst-val",
+                   "f-iface", "f-iface-dir", "f-frag", "f-rpfilter"):
             self._rebuild_raw()
         if wid in ("f-action", "f-chain"):
             self._update_conditional_rows()
@@ -962,6 +979,8 @@ class RuleEditor(ModalScreen):
         elif wid == "f-svc":
             title, placeholder = ("Service value (db entry or raw name)",
                                   "e.g. ssh, https, or dservices(a,b)")
+        elif wid == "f-sport":
+            title, placeholder = "Source port", "e.g. 1024 or 1000:2000"
         else:  # f-action (dscp)
             title, placeholder = "DSCP value", "e.g. 0x2e"
         self.app.push_screen(
@@ -976,6 +995,8 @@ class RuleEditor(ModalScreen):
         if wid == "f-svc":
             m = (re.search(r"dservices\(([^)]+)\)", raw)
                  or re.search(r"dservice\(([^)]+)\)", raw))
+        elif wid == "f-sport":
+            m = re.search(r"--sport\s+(\S+)", raw)
         elif wid == "f-action":
             m = re.search(r"dscp\(([^)]+)\)", raw)
             return m.group(1) if m else ""
@@ -1072,6 +1093,8 @@ class RuleEditor(ModalScreen):
                 self.query_one("#f-dst-type", Select).value)
         if fid == "f-svc":
             return "services"
+        if fid == "f-sport":
+            return "services"
         if fid == "f-to-host":
             return "hosts"
         if fid == "f-to-svc":
@@ -1124,6 +1147,7 @@ class RuleEditor(ModalScreen):
         (raw values that are not db entries are re-added as options)."""
         for wid, opts in (
             ("#f-svc", self._service_options()),
+            ("#f-sport", self._sport_options()),
             ("#f-to-host", [("(none)", "")]
              + [(f"host({h})", f"host({h})") for h in self.hosts]),
             ("#f-to-svc", self._to_svc_options()),
