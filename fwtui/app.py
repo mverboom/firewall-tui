@@ -260,6 +260,9 @@ PROTOS = [("both (46)", "46"), ("IPv4", "4"), ("IPv6", "6")]
 STATE_OPTIONS = ("NEW", "ESTABLISHED", "RELATED", "INVALID", "UNTRACKED")
 # frag() has exactly two options
 FRAG_OPTIONS = [("(none)", ""), ("more", "more"), ("first", "first")]
+# rpfilter() has three mutually-exclusive modes
+RPFILTER_OPTIONS = [("(none)", ""), ("loose", "loose"),
+                    ("strict", "strict"), ("validmark", "validmark")]
 
 # Sentinel value for the "(custom ...)" option in the Source/Dest dropdowns
 CUSTOM = "__custom__"
@@ -686,9 +689,9 @@ class RuleEditor(ModalScreen):
                 yield self._row("Source MAC", Input(
                     placeholder="e.g. 00:11:22:33:44:55", id="f-mac",
                     classes="finput -textual-compact"))
-                yield self._row("RP filter", Input(
-                    placeholder="loose | strict | validmark", id="f-rpfilter",
-                    classes="finput -textual-compact"))
+                yield self._row("RP filter", NavSelect(
+                    RPFILTER_OPTIONS, value="", id="f-rpfilter",
+                    classes="fselect -textual-compact", allow_blank=False))
                 yield self._row("Match content", Input(
                     placeholder="e.g. GET /admin", id="f-string",
                     classes="finput -textual-compact"))
@@ -822,16 +825,19 @@ class RuleEditor(ModalScreen):
                 # saving an existing rule never drops a dservice() clause
                 self._set_select_value(self.query_one("#f-svc", Select),
                                        m.group(1))
-            # match clauses: limit/time/recent/mac/rpfilter/string/owner
-            # (state and frag are handled separately: multi-select / dropdown)
+            # match clauses: limit/time/recent/mac/string/owner
+            # (state, frag and rpfilter are handled separately: pickers)
             for func, wid in (("limit", "#f-limit"), ("time", "#f-time"),
                               ("recent", "#f-recent"), ("mac", "#f-mac"),
-                              ("rpfilter", "#f-rpfilter"),
                               ("string", "#f-string"),
                               ("owner", "#f-owner")):
                 m = re.search(rf"{func}\(([^)]+)\)", raw)
                 if m:
                     self.query_one(wid, Input).value = m.group(1)
+            # rpfilter: dropdown
+            m = re.search(r"rpfilter\(([^)]*)\)", raw)
+            if m:
+                self.query_one("#f-rpfilter", Select).value = m.group(1)
             # state: set the selection from the comma-separated list
             m = re.search(r"state\(([^)]+)\)", raw)
             if m:
@@ -897,7 +903,8 @@ class RuleEditor(ModalScreen):
         time = self._match_clause("f-time", "time")
         recent = self._match_clause("f-recent", "recent")
         mac = self._match_clause("f-mac", "mac")
-        rpfilter = self._match_clause("f-rpfilter", "rpfilter")
+        rpfilter = self.query_one("#f-rpfilter", Select).value
+        rpfilter = f"rpfilter({rpfilter})" if rpfilter else ""
         string = self._match_clause("f-string", "string")
         owner = self._match_clause("f-owner", "owner")
         frag = self.query_one("#f-frag", Select).value
@@ -919,7 +926,7 @@ class RuleEditor(ModalScreen):
         if event.input.id in ("f-iface", "f-sport", "f-extra",
                               "f-logprefix", "f-lograte", "f-limit",
                               "f-time", "f-recent", "f-mac",
-                              "f-rpfilter", "f-string", "f-owner",
+                              "f-string", "f-owner",
                               "f-src-custom", "f-dst-custom"):
             self._rebuild_raw()
 
@@ -940,7 +947,7 @@ class RuleEditor(ModalScreen):
             return
         if wid in ("f-chain", "f-action", "f-svc", "f-to-host",
                    "f-to-svc", "f-src-val", "f-dst-val", "f-iface",
-                   "f-iface-dir", "f-frag"):
+                   "f-iface-dir", "f-frag", "f-rpfilter"):
             self._rebuild_raw()
         if wid in ("f-action", "f-chain"):
             self._update_conditional_rows()
