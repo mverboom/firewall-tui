@@ -592,10 +592,14 @@ class RuleEditor(ModalScreen):
         return ", ".join(hosts) if hosts else "Select hosts..."
 
     def _open_hosts_picker(self, wid: str) -> None:
-        """Open the multi-select host picker for a Source/Destination field."""
+        """Open the multi-select host picker for a Source/Destination field.
+        allow_custom lets the user add hostnames that aren't db entries
+        (resolved via DNS at deploy time, e.g. LAN hostnames)."""
         self.app.push_screen(
             ListPicker("Select hosts", self.hosts,
-                       self._src_hosts.get(wid, [])),
+                       self._src_hosts.get(wid, []),
+                       allow_custom=True,
+                       custom_placeholder="e.g. jenna (DNS hostname)"),
             lambda res, w=wid: self._on_hosts_picked(w, res))
 
     def _on_hosts_picked(self, wid: str, res) -> None:
@@ -1676,12 +1680,14 @@ class ListPicker(ModalScreen):
         Binding("enter", "confirm", "Confirm"),
     ]
 
-    def __init__(self, title: str, options, current, allow_custom=False) -> None:
+    def __init__(self, title: str, options, current, allow_custom=False,
+                 custom_placeholder: str = "e.g. G_CN") -> None:
         super().__init__()
         self.title = title
         self.options = list(options)
         self.current = set(current)
         self.allow_custom = allow_custom
+        self.custom_placeholder = custom_placeholder
 
     def compose(self) -> ComposeResult:
         yield Static(self.title, classes="modal-title")
@@ -1719,7 +1725,7 @@ class ListPicker(ModalScreen):
                 self.query_one("#list-picker", SelectionList).add_option(
                     (v, v, True))
         self.app.push_screen(
-            Prompt("Custom value", placeholder="e.g. G_CN"), cb)
+            Prompt("Custom value", placeholder=self.custom_placeholder), cb)
 
 
 class GroupEditor(BaseEditor):

@@ -49,7 +49,9 @@ Documentation:
   dropdown offers `dscp(...)` QoS marking. Source and Destination are two-step fields: pick a type
   (any / host / hosts / hostgroup / dns / network / networkgroup / custom) first, then the
   value dropdown for that type, a raw-value input for custom/dns, or a
-  multi-select picker for hosts (`hosts(a,b)`). The ipset
+  multi-select picker for hosts (`hosts(a,b)`). The hosts picker also lets
+  you add hostnames that aren't db entries (resolved via DNS at deploy
+  time, e.g. LAN hostnames). The ipset
   set-match types (hostgroup / networkgroup / dns) are emitted in the rule
   body as `func(x) src` / `func(x) dst` rather than behind a `-s`/`-d` flag
   (the manifest rejects the latter). The networkgroup dropdown also lists
