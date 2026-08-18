@@ -683,7 +683,7 @@ class RuleEditor(ModalScreen):
                 yield self._row("Recent", Input(
                     placeholder="set | check,60,5", id="f-recent",
                     classes="finput -textual-compact"))
-                yield self._row("MAC", Input(
+                yield self._row("Source MAC", Input(
                     placeholder="e.g. 00:11:22:33:44:55", id="f-mac",
                     classes="finput -textual-compact"))
                 yield self._row("RP filter", Input(
