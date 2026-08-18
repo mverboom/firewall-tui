@@ -303,6 +303,17 @@ class RuleEditor(ModalScreen):
     """Modal to add/edit a rule. Builder fields feed a live raw preview;
     the raw text is authoritative on save."""
 
+    CSS = """
+    /* Let dropdowns size to their content instead of wrapping long options
+       to the narrow width of the Select field (source/dest/service names
+       wrap into several lines otherwise). Capped at 60% of the screen so a
+       single very long option cannot overflow the terminal. */
+    Select > SelectOverlay {
+        width: auto;
+        max-width: 60vw;
+    }
+    """
+
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
         Binding("ctrl+s", "save", "Save"),
@@ -2513,16 +2524,20 @@ class FirewallApp(App):
             section = info[1]
             section_source = info[2]
         if section is None:
-            # default to first real section in the host file
+            # default to first real section in the host file. Skip the
+            # [global] section: it holds global settings, not rules, so a
+            # new rule must never land there (it is managed on the Global
+            # tab). When only [global] exists there is nothing to add to.
             host = os.path.join(self.fwdir, self.current_host)
             for l in self.lines:
-                if l.kind == "section" and l.source == host:
+                if (l.kind == "section" and l.name != "global"
+                        and l.source == host):
                     section = l.name
                     section_source = l.source
                     break
             if section is None:
                 for l in self.lines:
-                    if l.kind == "section":
+                    if l.kind == "section" and l.name != "global":
                         section = l.name
                         section_source = l.source
                         break
