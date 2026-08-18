@@ -1017,9 +1017,22 @@ class RuleEditor(ModalScreen):
                  "f-state", "f-time", "f-recent", "f-mac", "f-rpfilter",
                  "f-string", "f-owner", "f-frag", "f-extra", "f-raw")
 
+    @staticmethod
+    def _effectively_visible(widget) -> bool:
+        """True when a widget is actually shown on screen. A field's own
+        .display is True even when its row is hidden (the .natrow/.logrow
+        containers are hidden via display:none on the parent), so walk up
+        the DOM to check every ancestor's display."""
+        node = widget
+        while node is not None:
+            if not node.display:
+                return False
+            node = node.parent
+        return True
+
     def _fields(self) -> list:
         return [self.query_one(f"#{wid}") for wid in self.FIELD_IDS
-                if self.query_one(f"#{wid}").display]
+                if self._effectively_visible(self.query_one(f"#{wid}"))]
 
     def action_next_field(self) -> None:
         fields = self._fields()
