@@ -2506,7 +2506,10 @@ class FirewallApp(App):
         if tab in ("rules", "nat", "mangle"):
             self._add_rule()
         elif tab == "global":
-            self._add_global()
+            # no new global settings: the Global tab always shows every
+            # option (with its default) and only supports editing ('e')
+            self.notify("'a' isn't available here; the Global tab shows every "
+                        "setting, edit one with 'e'", severity="warning")
 
     def _add_rule(self) -> None:
         rk, info = self._selected_row()
@@ -2524,25 +2527,20 @@ class FirewallApp(App):
             section = info[1]
             section_source = info[2]
         if section is None:
-            # default to first real section in the host file. Skip the
-            # [global] section: it holds global settings, not rules, so a
-            # new rule must never land there (it is managed on the Global
-            # tab). When only [global] exists there is nothing to add to.
-            host = os.path.join(self.fwdir, self.current_host)
-            for l in self.lines:
-                if (l.kind == "section" and l.name != "global"
-                        and l.source == host):
-                    section = l.name
-                    section_source = l.source
-                    break
-            if section is None:
-                for l in self.lines:
-                    if l.kind == "section" and l.name != "global":
-                        section = l.name
-                        section_source = l.source
+            # default to the first real section visible in this tab. Only
+            # sections the user can actually see are fair game: silently
+            # picking an invisible one (hidden because it holds no rules for
+            # this table) is confusing. Press 'O' to show empty sections.
+            view = self._active_rules_view()
+            if view:
+                for row in view.rows:
+                    if row[0] == "section":
+                        section = row[1]
+                        section_source = row[2]
                         break
         if section is None:
-            self.notify("No section to add a rule to; press 'n' to create one",
+            self.notify("No visible section to add a rule to; press 'n' to "
+                        "create one, or 'O' to show empty sections",
                         severity="warning")
             return
         view = self._active_rules_view()
@@ -2660,7 +2658,9 @@ class FirewallApp(App):
         if tab in ("rules", "nat", "mangle"):
             self._delete_rule()
         elif tab == "global":
-            self._delete_global()
+            self.notify("'d' isn't available on the Global tab; edit a value "
+                        "with 'e' (or use '(unset)' to fall back to default)",
+                        severity="warning")
 
     def _delete_rule(self) -> None:
         rk, info = self._selected_row()
@@ -2982,37 +2982,6 @@ class FirewallApp(App):
         self._populate_rules()
 
     # -- global tab ---------------------------------------------------------
-    def _add_global(self) -> None:
-        self.push_screen(Prompt("New global key=value",
-                                placeholder="e.g. log=Unmatched traffic"),
-                         self._on_global_kv)
-
-    def _on_global_kv(self, kv) -> None:
-        if not kv or "=" not in kv:
-            return
-        key, value = kv.split("=", 1)
-        key, value = key.strip(), value.strip()
-        if key not in parser.GLOBAL_KEYS:
-            self.notify(f"Unknown global key '{key}'", severity="error")
-            return
-        if key in GLOBAL_OPTIONS and value not in GLOBAL_OPTIONS[key]:
-            self.notify(f"'{key}' must be one of: {', '.join(GLOBAL_OPTIONS[key])}",
-                        severity="error")
-            return
-        if value == "(unset)":
-            self.notify("'(unset)' is the default; leave the key out of the file",
-                        severity="warning")
-            return
-        if any(l.kind == "global" and l.key == key for l in self.lines):
-            self.notify(f"'{key}' is already set in this file; edit it instead",
-                        severity="warning")
-            return
-        self._snapshot()
-        self._insert_global(key, value)
-        self.dirty = True
-        self._populate_global()
-        self._populate_rules()
-
     def _edit_global(self) -> None:
         t = self.query_one("#global-table", DataTable)
         if not t.row_count:
@@ -3069,23 +3038,6 @@ class FirewallApp(App):
                 return  # same as the default: no need to write it
             self._snapshot()
             self._insert_global(key, value)
-        self.dirty = True
-        self._populate_global()
-        self._populate_rules()
-
-    def _delete_global(self) -> None:
-        t = self.query_one("#global-table", DataTable)
-        if not t.row_count:
-            return
-        rk, _ = t.coordinate_to_cell_key(t.cursor_coordinate)
-        key, _, state = t.get_row(rk)
-        if state == "(default)":
-            self.notify(f"'{key}' is not set in this file (using the default); "
-                        "nothing to delete", severity="warning")
-            return
-        self._snapshot()
-        self.lines = [l for l in self.lines
-                      if not (l.kind == "global" and l.key == key)]
         self.dirty = True
         self._populate_global()
         self._populate_rules()
