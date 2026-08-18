@@ -43,8 +43,9 @@ from textual.message import Message
 from textual.screen import ModalScreen, Screen
 from textual.css.query import NoMatches
 from textual.widgets import (
-    Button, Checkbox, DataTable, Footer, Header, Input, Label, ListItem,
-    ListView, Select, Static, TabbedContent, TabPane, TextArea,
+    Button, DataTable, Footer, Header, Input, Label, ListItem,
+    ListView, Select, SelectionList, Static, TabbedContent, TabPane,
+    TextArea,
 )
 from textual.widgets._select import SelectOverlay
 from textual.widgets._tabbed_content import ContentTabs
@@ -420,15 +421,11 @@ class RuleEditor(ModalScreen):
         if f is None:
             return None
         # source/dest are composite (type + value + custom); map any of their
-        # sub-fields to the same help. State is a row of checkboxes.
+        # sub-fields to the same help
         help_id = {"f-src-type": "f-src", "f-src-val": "f-src",
                    "f-src-custom": "f-src", "f-dst-type": "f-dst",
-                   "f-dst-val": "f-dst", "f-dst-custom": "f-dst",
-                   "f-state-new": "f-state",
-                   "f-state-established": "f-state",
-                   "f-state-related": "f-state",
-                   "f-state-invalid": "f-state",
-                   "f-state-untracked": "f-state"}.get(f.id, f.id)
+                   "f-dst-val": "f-dst", "f-dst-custom": "f-dst"}.get(
+                       f.id, f.id)
         label = {"f-src": "Source", "f-dst": "Destination"}.get(help_id)
         if label is None:
             # find the row label for this field id
@@ -454,6 +451,7 @@ class RuleEditor(ModalScreen):
         self.text = text
         self._baseline_text = ""  # raw text snapshot on mount (for edits)
         self._pending_jump = None
+        self.state_selection: set[str] = set()  # selected conntrack states
         self.db = db or expand.Db()
         self.services = list(self.db.services)
         self.hosts = list(self.db.hosts)
@@ -628,18 +626,22 @@ class RuleEditor(ModalScreen):
             out.append(("(custom dscp ...)", CUSTOM_DSCP))
         return out
 
-    def _state_field(self) -> Horizontal:
-        """A row of compact checkboxes for the conntrack state match."""
-        return Horizontal(
-            *(Checkbox(s, id=f"f-state-{s.lower()}", compact=True)
-              for s in STATE_OPTIONS),
-            classes="state-row")
+    def _state_field(self) -> Button:
+        """A pulldown-style button showing the selected states; opens the
+        StatePicker multi-select on activation."""
+        return Button(self._state_label(), id="f-state",
+                      classes="fselect -textual-compact")
+
+    def _state_label(self) -> str:
+        """Display text for the state field: the selected states or
+        '(none)'."""
+        return ", ".join(s for s in STATE_OPTIONS
+                          if s in self.state_selection) or "(none)"
 
     def _state_value(self) -> str:
         """Comma-separated selected states, or '' if none."""
-        return ",".join(
-            s for s in STATE_OPTIONS
-            if self.query_one(f"#f-state-{s.lower()}", Checkbox).value)
+        return ",".join(s for s in STATE_OPTIONS
+                         if s in self.state_selection)
 
     def compose(self) -> ComposeResult:
         yield Static("Rule editor", classes="modal-title")
@@ -830,14 +832,12 @@ class RuleEditor(ModalScreen):
                 m = re.search(rf"{func}\(([^)]+)\)", raw)
                 if m:
                     self.query_one(wid, Input).value = m.group(1)
-            # state: set the checkboxes from the comma-separated list
+            # state: set the selection from the comma-separated list
             m = re.search(r"state\(([^)]+)\)", raw)
             if m:
-                states = {s.strip().upper()
-                          for s in m.group(1).split(",")}
-                for s in STATE_OPTIONS:
-                    self.query_one(f"#f-state-{s.lower()}",
-                                   Checkbox).value = s in states
+                self.state_selection = {s.strip().upper()
+                                        for s in m.group(1).split(",")}
+                self.query_one("#f-state", Button).label = self._state_label()
             # frag: dropdown
             m = re.search(r"frag\(([^)]+)\)", raw)
             if m:
@@ -923,12 +923,6 @@ class RuleEditor(ModalScreen):
                               "f-src-custom", "f-dst-custom"):
             self._rebuild_raw()
 
-    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
-        if self._syncing:
-            return
-        if event.checkbox.id and event.checkbox.id.startswith("f-state-"):
-            self._rebuild_raw()
-
     def on_select_changed(self, event: Select.Changed) -> None:
         if self._syncing:
             return
@@ -995,6 +989,21 @@ class RuleEditor(ModalScreen):
             self.action_save()
         elif event.button.id == "btn-cancel":
             self.action_cancel()
+        elif event.button.id == "f-state":
+            self._open_state_picker()
+
+    def _open_state_picker(self) -> None:
+        """Open the multi-select state picker; apply the result on close."""
+        self.app.push_screen(
+            StatePicker(set(self.state_selection)),
+            lambda res: self._on_state_picked(res))
+
+    def _on_state_picked(self, res) -> None:
+        if res is None:
+            return
+        self.state_selection = set(res)
+        self.query_one("#f-state", Button).label = self._state_label()
+        self._rebuild_raw()
 
     def action_save(self) -> None:
         # the table comes from the tab the rule was edited in; the editor's
@@ -1169,8 +1178,7 @@ class RuleEditor(ModalScreen):
     FIELD_IDS = ("f-chain", "f-iface-dir", "f-iface", "f-src-type",
                  "f-src-val", "f-src-custom", "f-sport", "f-dst-type",
                  "f-dst-val", "f-dst-custom", "f-svc", "f-proto",
-                 "f-limit", "f-state-new", "f-state-established",
-                 "f-state-related", "f-state-invalid", "f-state-untracked",
+                 "f-limit", "f-state",
                  "f-time", "f-recent", "f-mac", "f-rpfilter",
                  "f-string", "f-owner", "f-frag", "f-action",
                  "f-to-host", "f-to-svc", "f-logprefix", "f-lograte",
@@ -1288,6 +1296,44 @@ class Prompt(ModalScreen):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+
+class StatePicker(ModalScreen):
+    """Multi-select for the conntrack state() match. A pulldown-style picker
+    where any combination of the valid states can be toggled."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("enter", "confirm", "Confirm"),
+    ]
+
+    def __init__(self, current: set[str]) -> None:
+        super().__init__()
+        self.current = current
+
+    def compose(self) -> ComposeResult:
+        yield Static("Connection states", classes="modal-title")
+        yield SelectionList(
+            *((s, s in self.current) for s in STATE_OPTIONS),
+            id="state-list")
+        with Horizontal(id="modal-buttons"):
+            yield Button("OK", variant="primary", id="btn-ok")
+            yield Button("Cancel", id="btn-cancel")
+
+    def _selected(self) -> set[str]:
+        return set(self.query_one("#state-list", SelectionList).selected)
+
+    def action_confirm(self) -> None:
+        self.dismiss(self._selected())
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-ok":
+            self.dismiss(self._selected())
+        elif event.button.id == "btn-cancel":
+            self.dismiss(None)
 
 
 class DbEntryEditor(ModalScreen):
@@ -2137,8 +2183,6 @@ class FirewallApp(App):
     .ownerrow.-show { display: block; }
     .iface-dir { display: none; width: 6; }
     .iface-dir.-show { display: block; }
-    .state-row { width: 1fr; }
-    .state-row Checkbox { margin: 0 1 0 0; }
     .flabel { width: 22; padding: 0 1 0 0; }
     .fselect { width: 1fr; }
     .finput { width: 1fr; }
