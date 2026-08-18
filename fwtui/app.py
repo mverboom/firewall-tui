@@ -1412,7 +1412,7 @@ class ServiceEditor(ModalScreen):
         self.query_one(".icmprow").set_class(proto == "icmp", "-show")
 
     def on_mount(self) -> None:
-        for w in self.query(".finput"):
+        for w in self.query(".fselect, .finput"):
             w.add_class("-textual-compact")
         v = self.value
         if v == "icmp":
