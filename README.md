@@ -47,8 +47,9 @@ Documentation:
   `time()` / `recent()` / `mac()` / `rpfilter()` / `string()` / `owner()` /
   `frag()` functions into the rule body; the mangle Action
   dropdown offers `dscp(...)` QoS marking. Source and Destination are two-step fields: pick a type
-  (any / host / hostgroup / dns / network / networkgroup / custom) first, then the
-  value dropdown for that type or a raw-value input for custom/dns. The ipset
+  (any / host / hosts / hostgroup / dns / network / networkgroup / custom) first, then the
+  value dropdown for that type, a raw-value input for custom/dns, or a
+  multi-select picker for hosts (`hosts(a,b)`). The ipset
   set-match types (hostgroup / networkgroup / dns) are emitted in the rule
   body as `func(x) src` / `func(x) dst` rather than behind a `-s`/`-d` flag
   (the manifest rejects the latter). The networkgroup dropdown also lists

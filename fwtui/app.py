@@ -240,6 +240,7 @@ ACTIONS_BY_TABLE = {
 SRC_TYPES = [
     ("(any)", "any"),
     ("host", "host"),
+    ("hosts", "hosts"),
     ("hostgroup", "hostgroup"),
     ("dns", "dns"),
     ("network", "network"),
@@ -380,10 +381,11 @@ class RuleEditor(ModalScreen):
                     "to, e.g. eth0, vlan10.",
         "f-iface-dir": "Interface direction: -i (input) or -o (output). "
                         "Only shown for FORWARD, where both apply.",
-        "f-src": "Source address: a host, hostgroup, network, networkgroup, "
-                  "dns name, or a raw IP/address.",
-        "f-dst": "Destination address: a host, hostgroup, network, "
-                  "networkgroup, dns name, or a raw IP/address.",
+        "f-src": "Source address: a host, hosts (multi-select), hostgroup, "
+                  "network, networkgroup, dns name, or a raw IP/address.",
+        "f-dst": "Destination address: a host, hosts (multi-select), "
+                  "hostgroup, network, networkgroup, dns name, or a raw "
+                  "IP/address.",
         "f-sport": "Source port (--sport). Pick a db service's port or "
                     "enter a custom port/range, e.g. 1024 or 1000:2000. "
                     "Rarely needed; most rules match only the destination "
@@ -459,6 +461,7 @@ class RuleEditor(ModalScreen):
         self._baseline_text = ""  # raw text snapshot on mount (for edits)
         self._pending_jump = None
         self.state_selection: set[str] = set()  # selected conntrack states
+        self._src_hosts: dict[str, list[str]] = {"f-src": [], "f-dst": []}
         self.db = db or expand.Db()
         self.services = list(self.db.services)
         self.hosts = list(self.db.hosts)
@@ -538,8 +541,9 @@ class RuleEditor(ModalScreen):
 
     def _src_field(self, wid: str) -> Horizontal:
         """Two-step Source/Destination field: a type dropdown (any / host /
-        hostgroup / network / networkgroup / custom) plus, next to it, the
-        value dropdown for that type or a raw-value input for custom."""
+        hosts / hostgroup / network / networkgroup / custom) plus, next to
+        it, the value dropdown for that type, a raw-value input for custom,
+        or a multi-select button for hosts."""
         return Horizontal(
             NavSelect(SRC_TYPES, value="any", id=f"{wid}-type",
                       classes="fselect src-type", allow_blank=False),
@@ -547,24 +551,30 @@ class RuleEditor(ModalScreen):
                       classes="fselect src-val", allow_blank=False),
             Input(placeholder="raw value (IP, host(x), ...)",
                   id=f"{wid}-custom", classes="finput src-custom"),
+            Button("Select hosts...", id=f"{wid}-hosts",
+                   classes="fselect src-hosts"),
             id=f"{wid}-box", classes="fbox")
 
     def _apply_src_type(self, wid: str) -> None:
         """Populate the value dropdown and show/hide the value dropdown vs
-        the custom input for the field's current type. Does not touch the
-        raw text. A value that is still valid for the new type is kept
-        (so deferred Select.Changed messages from a sync don't wipe it)."""
+        the custom input vs the hosts multi-select button for the field's
+        current type. Does not touch the raw text. A value that is still
+        valid for the new type is kept (so deferred Select.Changed messages
+        from a sync don't wipe it)."""
         kind = self.query_one(f"#{wid}-type", Select).value
         val_sel = self.query_one(f"#{wid}-val", Select)
         custom_in = self.query_one(f"#{wid}-custom", Input)
+        hosts_btn = self.query_one(f"#{wid}-hosts", Button)
         cur = val_sel.value
         val_sel.set_options(self._src_type_options(kind))
         if cur in [v for _, v in val_sel._options]:
             val_sel.value = cur
         else:
             val_sel.value = ""
-        val_sel.display = kind not in ("any", "custom", "dns")
+        val_sel.display = kind not in ("any", "custom", "dns", "hosts")
         custom_in.display = kind in ("custom", "dns")
+        hosts_btn.display = kind == "hosts"
+        hosts_btn.label = self._hosts_label(wid)
         custom_in.placeholder = ("domain name (resolved on the firewall host)"
                                  if kind == "dns" else
                                  "raw value (IP, host(x), ...)")
@@ -575,17 +585,41 @@ class RuleEditor(ModalScreen):
         self._apply_src_type(wid)
         self._rebuild_raw()
 
+    def _hosts_label(self, wid: str) -> str:
+        """Display text for the hosts multi-select button: the selected
+        host names or 'Select hosts...'."""
+        hosts = self._src_hosts.get(wid, [])
+        return ", ".join(hosts) if hosts else "Select hosts..."
+
+    def _open_hosts_picker(self, wid: str) -> None:
+        """Open the multi-select host picker for a Source/Destination field."""
+        self.app.push_screen(
+            ListPicker("Select hosts", self.hosts,
+                       self._src_hosts.get(wid, [])),
+            lambda res, w=wid: self._on_hosts_picked(w, res))
+
+    def _on_hosts_picked(self, wid: str, res) -> None:
+        """Apply the picked hosts to the field and rebuild the raw text."""
+        if res is None:
+            return
+        self._src_hosts[wid] = list(res)
+        self.query_one(f"#{wid}-hosts", Button).label = self._hosts_label(wid)
+        self._rebuild_raw()
+
     def _set_src_value(self, wid: str, raw_value: str) -> None:
         """Set the type + value widgets from a raw -s/-d value (e.g.
         'host(proxy)' -> type host, value proxy; '192.168.1.77' -> custom)."""
         wid = wid.lstrip("#")
-        m = re.match(r"(host|hostgroup|network|networkgroup|dns)\(([^)]+)\)",
+        m = re.match(r"(host|hosts|hostgroup|network|networkgroup|dns)\(([^)]+)\)",
                      raw_value)
         kind, name = (m.group(1), m.group(2)) if m else ("custom", raw_value)
         self.query_one(f"#{wid}-type", Select).value = kind
         self._apply_src_type(wid)
         if kind in ("custom", "dns"):
             self.query_one(f"#{wid}-custom", Input).value = name
+        elif kind == "hosts":
+            self._src_hosts[wid] = [h.strip() for h in name.split(",") if h.strip()]
+            self.query_one(f"#{wid}-hosts", Button).label = self._hosts_label(wid)
         else:
             self._set_select_value(self.query_one(f"#{wid}-val", Select),
                                    raw_value)
@@ -609,6 +643,9 @@ class RuleEditor(ModalScreen):
             return f"{value} {direction}" if value else ""
         if kind == "custom":
             return self.query_one(f"#{wid}-custom", Input).value.strip()
+        if kind == "hosts":
+            hosts = self._src_hosts.get(wid, [])
+            return f"hosts({','.join(hosts)})" if hosts else ""
         return self.query_one(f"#{wid}-val", Select).value or ""
 
     def _set_select_value(self, sel: Select, value: str) -> None:
@@ -1022,6 +1059,8 @@ class RuleEditor(ModalScreen):
             self.action_cancel()
         elif event.button.id == "f-state":
             self._open_state_picker()
+        elif event.button.id in ("f-src-hosts", "f-dst-hosts"):
+            self._open_hosts_picker(event.button.id[:-6])  # strip "-hosts"
 
     def _open_state_picker(self) -> None:
         """Open the multi-select state picker; apply the result on close."""
@@ -1082,13 +1121,14 @@ class RuleEditor(ModalScreen):
         fid = self._focused_field_id()
         if fid is None:
             return None
-        kind_section = {"host": "hosts", "hostgroup": "hostgroups",
+        kind_section = {"host": "hosts", "hosts": "hosts",
+                        "hostgroup": "hostgroups",
                         "network": "networks",
                         "networkgroup": "networkgroups"}
-        if fid in ("f-src-type", "f-src-val", "f-src-custom"):
+        if fid in ("f-src-type", "f-src-val", "f-src-custom", "f-src-hosts"):
             return kind_section.get(
                 self.query_one("#f-src-type", Select).value)
-        if fid in ("f-dst-type", "f-dst-val", "f-dst-custom"):
+        if fid in ("f-dst-type", "f-dst-val", "f-dst-custom", "f-dst-hosts"):
             return kind_section.get(
                 self.query_one("#f-dst-type", Select).value)
         if fid == "f-svc":
@@ -1224,9 +1264,9 @@ class RuleEditor(ModalScreen):
         fid = self._focused_field_id()
         if fid is None:
             return None
-        if fid in ("f-src-type", "f-src-val", "f-src-custom"):
+        if fid in ("f-src-type", "f-src-val", "f-src-custom", "f-src-hosts"):
             return self._src_field_db_ref("f-src")
-        if fid in ("f-dst-type", "f-dst-val", "f-dst-custom"):
+        if fid in ("f-dst-type", "f-dst-val", "f-dst-custom", "f-dst-hosts"):
             return self._src_field_db_ref("f-dst")
         if fid == "f-svc":
             return self._service_db_ref()
