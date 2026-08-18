@@ -1343,16 +1343,14 @@ class StatePicker(ModalScreen):
             self.dismiss(None)
 
 
-class ServiceEditor(ModalScreen):
-    """Structured editor for a db [services] entry: a name plus either a
-    port/range + protocol, or an ICMP type. The assembled value is stored as
-    '<port>/<proto>', '<range>/<proto>', 'icmp' or 'icmp/<type>'. F1 shows
-    per-field context help."""
+class BaseEditor(ModalScreen):
+    """Shared behavior for the structured db entry editors: field
+    navigation, F1 context help, and save/cancel. Subclasses provide
+    FIELD_HELP, FIELD_IDS, compose(), _value() and _validate(), and an
+    on_mount() that populates the fields from the value being edited."""
 
     CSS = """
-    ServiceEditor #db-error { color: $error; }
-    ServiceEditor .portrow, ServiceEditor .icmprow { display: none; }
-    ServiceEditor .portrow.-show, ServiceEditor .icmprow.-show { display: block; }
+    BaseEditor #db-error { color: $error; }
     """
 
     BINDINGS = [
@@ -1363,6 +1361,102 @@ class ServiceEditor(ModalScreen):
         Binding("up", "prev_field", "Prev field", show=False),
         Binding("down", "next_field", "Next field", show=False),
     ]
+
+    FIELD_HELP: dict[str, str] = {}
+    FIELD_IDS: tuple[str, ...] = ()
+    BUTTON_IDS = ("#btn-save", "#btn-cancel")
+
+    def _row(self, label: str, widget, classes: str = "") -> Horizontal:
+        return Horizontal(Label(label, classes="flabel"), widget,
+                          classes=f"frow {classes}".strip())
+
+    @staticmethod
+    def _effectively_visible(widget) -> bool:
+        """True when a widget is actually shown (its own and every ancestor's
+        display is not none)."""
+        node = widget
+        while node is not None:
+            if not node.display:
+                return False
+            node = node.parent
+        return True
+
+    def _focus_cycle(self) -> list:
+        """The focusable widgets in navigation order: the visible fields
+        followed by the Save/Cancel buttons."""
+        cycle = [self.query_one(f"#{wid}") for wid in self.FIELD_IDS
+                 if self._effectively_visible(self.query_one(f"#{wid}"))]
+        cycle += [self.query_one(wid) for wid in self.BUTTON_IDS]
+        return cycle
+
+    def action_next_field(self) -> None:
+        cycle = self._focus_cycle()
+        if not cycle:
+            return
+        cur = self.focused
+        if cur in cycle:
+            cycle[(cycle.index(cur) + 1) % len(cycle)].focus()
+        else:
+            cycle[0].focus()
+
+    def action_prev_field(self) -> None:
+        cycle = self._focus_cycle()
+        if not cycle:
+            return
+        cur = self.focused
+        if cur in cycle:
+            cycle[(cycle.index(cur) - 1) % len(cycle)].focus()
+        else:
+            cycle[-1].focus()
+
+    def focused_field_help(self) -> tuple[str, str] | None:
+        f = self.focused
+        if f is None:
+            return None
+        label = None
+        for row in self.query(".frow"):
+            try:
+                lab = row.query_one(".flabel")
+            except NoMatches:
+                continue
+            if row.query(f"#{f.id}"):
+                label = str(lab.content)
+                break
+        desc = self.FIELD_HELP.get(f.id)
+        if desc is None:
+            return None
+        return (label or f.id, desc)
+
+    def action_save(self) -> None:
+        key = self.query_one("#db-key", Input).value.strip()
+        value = self._value()
+        errs = self._validate(key, value)
+        if errs:
+            self.query_one("#db-error", Static).update(escape("\n".join(errs)))
+            return
+        self.dismiss({"key": key, "value": value})
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-save":
+            self.action_save()
+        elif event.button.id == "btn-cancel":
+            self.action_cancel()
+
+
+class ServiceEditor(BaseEditor):
+    """Structured editor for a db [services] entry: a name plus either a
+    port/range + protocol, or an ICMP type. The assembled value is stored as
+    '<port>/<proto>', '<range>/<proto>', 'icmp' or 'icmp/<type>'. F1 shows
+    per-field context help."""
+
+    CSS = """
+    ServiceEditor #db-error { color: $error; }
+    ServiceEditor .portrow, ServiceEditor .icmprow { display: none; }
+    ServiceEditor .portrow.-show, ServiceEditor .icmprow.-show { display: block; }
+    """
 
     FIELD_HELP = {
         "db-key": "The service name, used as dservice(name) in rules.",
@@ -1379,10 +1473,6 @@ class ServiceEditor(ModalScreen):
         self.key = key
         self.value = value
         self.orig = orig
-
-    def _row(self, label: str, widget, classes: str = "") -> Horizontal:
-        return Horizontal(Label(label, classes="flabel"), widget,
-                          classes=f"frow {classes}".strip())
 
     def compose(self) -> ComposeResult:
         verb = "Edit" if self.orig else "New"
@@ -1446,80 +1536,244 @@ class ServiceEditor(ModalScreen):
         return self.app._validate_db_entry("services", key, value,
                                            orig=self.orig)
 
-    def action_save(self) -> None:
-        key = self.query_one("#db-key", Input).value.strip()
-        value = self._value()
-        errs = self._validate(key, value)
-        if errs:
-            self.query_one("#db-error", Static).update(escape("\n".join(errs)))
-            return
-        self.dismiss({"key": key, "value": value})
+
+class ListPicker(ModalScreen):
+    """Generic multi-select picker: a title plus a checkbox list of options,
+    with an optional 'add custom' entry for values not in the list (e.g.
+    G_<CC> country groups in a networkgroup)."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("enter", "confirm", "Confirm"),
+    ]
+
+    def __init__(self, title: str, options, current, allow_custom=False) -> None:
+        super().__init__()
+        self.title = title
+        self.options = list(options)
+        self.current = set(current)
+        self.allow_custom = allow_custom
+
+    def compose(self) -> ComposeResult:
+        yield Static(self.title, classes="modal-title")
+        yield SelectionList(
+            *((o, o, o in self.current) for o in self.options),
+            id="list-picker")
+        if self.allow_custom:
+            yield Button("Add custom...", id="btn-custom",
+                         classes="picker-add")
+        with Horizontal(id="modal-buttons"):
+            yield Button("OK", variant="primary", id="btn-ok")
+            yield Button("Cancel", id="btn-cancel")
+
+    def _selected(self) -> set[str]:
+        return set(self.query_one("#list-picker", SelectionList).selected)
+
+    def action_confirm(self) -> None:
+        self.dismiss(self._selected())
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-ok":
+            self.dismiss(self._selected())
+        elif event.button.id == "btn-cancel":
+            self.dismiss(None)
+        elif event.button.id == "btn-custom":
+            self._add_custom()
+
+    def _add_custom(self) -> None:
+        def cb(res) -> None:
+            if res and res.strip():
+                v = res.strip()
+                self.query_one("#list-picker", SelectionList).add_option(
+                    (v, v, True))
+        self.app.push_screen(
+            Prompt("Custom value", placeholder="e.g. G_CN"), cb)
+
+
+class GroupEditor(BaseEditor):
+    """Structured editor for a db group entry ([servicegroups]/[hostgroups]/
+    [networkgroups]): a name plus a multi-select of members."""
+
+    CSS = """
+    GroupEditor #db-error { color: $error; }
+    """
+
+    FIELD_HELP = {
+        "db-key": "The group name, used as group(name) in rules.",
+        "db-members": "The members of this group; press to pick from the db.",
+    }
+    FIELD_IDS = ("db-key", "db-members")
+
+    def __init__(self, section: str, key: str = "", value: str = "",
+                 orig: "parser.DbLine | None" = None,
+                 options: list | None = None,
+                 allow_custom: bool = False) -> None:
+        super().__init__()
+        self.section = section
+        self.key = key
+        self.value = value
+        self.orig = orig
+        self.options = list(options or [])
+        self.allow_custom = allow_custom
+        self.members: set[str] = set()
+
+    def _ordered_members(self) -> list[str]:
+        """Members in option order, then any extras (custom) sorted."""
+        order = [o for o in self.options if o in self.members]
+        extras = sorted(m for m in self.members if m not in order)
+        return order + extras
+
+    def _members_label(self) -> str:
+        return ", ".join(self._ordered_members()) or "(none)"
+
+    def compose(self) -> ComposeResult:
+        verb = "Edit" if self.orig else "New"
+        yield Static(f"{verb} group", classes="modal-title")
+        yield self._row("Name", Input(self.key, id="db-key",
+                        classes="finput -textual-compact"))
+        yield self._row("Members", Button(
+            self._members_label(), id="db-members",
+            classes="fselect -textual-compact"))
+        yield Static("", id="db-error", classes="dberror")
+        with Horizontal(id="modal-buttons"):
+            yield Button("Save", variant="primary", id="btn-save")
+            yield Button("Cancel", id="btn-cancel")
+
+    def on_mount(self) -> None:
+        for w in self.query(".fselect, .finput"):
+            w.add_class("-textual-compact")
+        self.members = {m.strip() for m in self.value.split(",") if m.strip()}
+        self.query_one("#db-members", Button).label = self._members_label()
+        self.query_one("#db-key").focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-save":
             self.action_save()
         elif event.button.id == "btn-cancel":
             self.action_cancel()
+        elif event.button.id == "db-members":
+            self._open_picker()
 
-    @staticmethod
-    def _effectively_visible(widget) -> bool:
-        """True when a widget is actually shown (its own and every ancestor's
-        display is not none)."""
-        node = widget
-        while node is not None:
-            if not node.display:
-                return False
-            node = node.parent
-        return True
+    def _open_picker(self) -> None:
+        self.app.push_screen(
+            ListPicker(self.section, self.options, self.members,
+                       allow_custom=self.allow_custom),
+            lambda res: self._on_picked(res))
 
-    def _focus_cycle(self) -> list:
-        """The focusable widgets in navigation order: the visible fields
-        followed by the Save/Cancel buttons."""
-        cycle = [self.query_one(f"#{wid}") for wid in self.FIELD_IDS
-                 if self._effectively_visible(self.query_one(f"#{wid}"))]
-        cycle += [self.query_one("#btn-save"), self.query_one("#btn-cancel")]
-        return cycle
-
-    def action_next_field(self) -> None:
-        cycle = self._focus_cycle()
-        if not cycle:
+    def _on_picked(self, res) -> None:
+        if res is None:
             return
-        cur = self.focused
-        if cur in cycle:
-            cycle[(cycle.index(cur) + 1) % len(cycle)].focus()
-        else:
-            cycle[0].focus()
+        self.members = set(res)
+        self.query_one("#db-members", Button).label = self._members_label()
 
-    def action_prev_field(self) -> None:
-        cycle = self._focus_cycle()
-        if not cycle:
+    def _value(self) -> str:
+        return ",".join(self._ordered_members())
+
+    def _validate(self, key: str, value: str) -> list[str]:
+        return self.app._validate_db_entry(self.section, key, value,
+                                           orig=self.orig)
+
+
+class HostNetworkEditor(BaseEditor):
+    """Structured editor for db [hosts]/[networks] entries: a name plus a
+    list of values (space or comma separated)."""
+
+    CSS = """
+    HostNetworkEditor #db-error { color: $error; }
+    """
+
+    FIELD_HELP = {
+        "db-key": "The name, used as host(name)/network(name) in rules.",
+        "db-values": "One or more values. Hosts: IP addresses. "
+                     "Networks: network/mask, e.g. 192.168.0.0/24.",
+    }
+    FIELD_IDS = ("db-key", "db-values")
+
+    def __init__(self, section: str, key: str = "", value: str = "",
+                 orig: "parser.DbLine | None" = None) -> None:
+        super().__init__()
+        self.section = section
+        self.key = key
+        self.value = value
+        self.orig = orig
+
+    def compose(self) -> ComposeResult:
+        noun = "host" if self.section == "hosts" else "network"
+        verb = "Edit" if self.orig else "New"
+        placeholder = ("e.g. 192.168.1.1 or 192.168.1.1 10.0.0.1"
+                       if self.section == "hosts"
+                       else "e.g. 192.168.0.0/24")
+        yield Static(f"{verb} {noun}", classes="modal-title")
+        yield self._row("Name", Input(self.key, id="db-key",
+                        classes="finput -textual-compact"))
+        yield self._row("Values", Input(
+            self.value, id="db-values", placeholder=placeholder,
+            classes="finput -textual-compact"))
+        yield Static("", id="db-error", classes="dberror")
+        with Horizontal(id="modal-buttons"):
+            yield Button("Save", variant="primary", id="btn-save")
+            yield Button("Cancel", id="btn-cancel")
+
+    def on_mount(self) -> None:
+        for w in self.query(".finput"):
+            w.add_class("-textual-compact")
+        self.query_one("#db-key").focus()
+
+    def _value(self) -> str:
+        raw = self.query_one("#db-values", Input).value
+        return " ".join(raw.replace(",", " ").split())
+
+    def _validate(self, key: str, value: str) -> list[str]:
+        return self.app._validate_db_entry(self.section, key, value,
+                                           orig=self.orig)
+
+
+class GeoipEditor(BaseEditor):
+    """Editor for the [geoip] section (the maxminddir path)."""
+
+    CSS = """
+    GeoipEditor #db-error { color: $error; }
+    """
+
+    FIELD_HELP = {
+        "db-path": "Path to the GeoLite2 MaxMind databases directory.",
+    }
+    FIELD_IDS = ("db-path",)
+
+    def __init__(self, key: str = "", value: str = "",
+                 orig: "parser.DbLine | None" = None) -> None:
+        super().__init__()
+        self.key = key
+        self.value = value
+        self.orig = orig
+
+    def compose(self) -> ComposeResult:
+        yield Static("GeoIP (MaxMind)", classes="modal-title")
+        yield self._row("MaxMind dir", Input(
+            self.value, id="db-path", placeholder="/path/to/maxminddbs",
+            classes="finput -textual-compact"))
+        yield Static("", id="db-error", classes="dberror")
+        with Horizontal(id="modal-buttons"):
+            yield Button("Save", variant="primary", id="btn-save")
+            yield Button("Cancel", id="btn-cancel")
+
+    def on_mount(self) -> None:
+        self.query_one("#db-path", Input).add_class("-textual-compact")
+        self.query_one("#db-path").focus()
+
+    def action_save(self) -> None:
+        value = self.query_one("#db-path", Input).value.strip()
+        errs = self._validate("maxminddir", value)
+        if errs:
+            self.query_one("#db-error", Static).update(escape("\n".join(errs)))
             return
-        cur = self.focused
-        if cur in cycle:
-            cycle[(cycle.index(cur) - 1) % len(cycle)].focus()
-        else:
-            cycle[-1].focus()
+        self.dismiss({"key": "maxminddir", "value": value})
 
-    def focused_field_help(self) -> tuple[str, str] | None:
-        f = self.focused
-        if f is None:
-            return None
-        label = None
-        for row in self.query(".frow"):
-            try:
-                lab = row.query_one(".flabel")
-            except NoMatches:
-                continue
-            if row.query(f"#{f.id}"):
-                label = str(lab.content)
-                break
-        desc = self.FIELD_HELP.get(f.id)
-        if desc is None:
-            return None
-        return (label or f.id, desc)
+    def _validate(self, key: str, value: str) -> list[str]:
+        return self.app._validate_db_entry("geoip", key, value, orig=self.orig)
 
 
 class DbEntryEditor(ModalScreen):
@@ -2378,6 +2632,7 @@ class FirewallApp(App):
     #rawcol TextArea { height: 1fr; }
     #modal-buttons { height: 2; align-horizontal: left; align-vertical: middle; padding: 0 1; }
     #modal-buttons Button { margin: 0 1 0 0; }
+    .picker-add { margin: 0 1; }
     .modal-title { padding: 1; text-style: bold; }
     #report { height: 20; }
     """
@@ -3609,6 +3864,30 @@ class FirewallApp(App):
         self._populate_db()
         return True
 
+    def _db_leaf_options(self, section: str) -> list[str]:
+        """The member names to offer when picking a group's members."""
+        leaf = {"servicegroups": "services", "hostgroups": "hosts",
+                "networkgroups": "networks"}[section]
+        names = set(getattr(self.db, leaf, {}).keys())
+        if section == "networkgroups":
+            names.update(self.db.networkgroups.keys())
+        return sorted(names)
+
+    def _new_db_editor(self, section: str, key: str = "", value: str = "",
+                       orig=None):
+        """Build the structured editor for a db entry in the given section."""
+        if section == "services":
+            return ServiceEditor(key=key, value=value, orig=orig)
+        if section in ("servicegroups", "hostgroups", "networkgroups"):
+            return GroupEditor(section, key=key, value=value, orig=orig,
+                               options=self._db_leaf_options(section),
+                               allow_custom=(section == "networkgroups"))
+        if section in ("hosts", "networks"):
+            return HostNetworkEditor(section, key=key, value=value, orig=orig)
+        if section == "geoip":
+            return GeoipEditor(key=key, value=value, orig=orig)
+        return DbEntryEditor(section, key=key, value=value, orig=orig)
+
     def _add_db_entry(self) -> None:
         rk, info = self._selected_row()
         section = None
@@ -3623,9 +3902,7 @@ class FirewallApp(App):
             self.notify("db file has no sections", severity="warning")
             return
         self.current_dbsection = section
-        editor = (ServiceEditor() if section == "services"
-                  else DbEntryEditor(section))
-        self.push_screen(editor, self._on_db_entry)
+        self.push_screen(self._new_db_editor(section), self._on_db_entry)
 
     def _on_db_entry(self, result) -> None:
         if not result:
@@ -3658,13 +3935,8 @@ class FirewallApp(App):
             self.notify("Select a db entry to edit", severity="warning")
             return
         e = self.dblines[info[4]]
-        if e.section == "services":
-            editor = ServiceEditor(key=e.key, value=e.value, orig=e)
-        else:
-            editor = DbEntryEditor(e.section, key=e.key, value=e.value,
-                                   orig=e)
         self.push_screen(
-            editor,
+            self._new_db_editor(e.section, key=e.key, value=e.value, orig=e),
             lambda res, old=e: self._on_db_entry_edit(old, res))
 
     def _on_db_entry_edit(self, old, result) -> None:
