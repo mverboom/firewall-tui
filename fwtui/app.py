@@ -1311,8 +1311,9 @@ class RuleEditor(ModalScreen):
 
     # -- form navigation ----------------------------------------------------
     FIELD_IDS = ("f-chain", "f-iface-dir", "f-iface", "f-src-type",
-                 "f-src-val", "f-src-custom", "f-sport", "f-dst-type",
-                 "f-dst-val", "f-dst-custom", "f-svc", "f-proto",
+                 "f-src-val", "f-src-custom", "f-src-hosts", "f-sport",
+                 "f-dst-type", "f-dst-val", "f-dst-custom", "f-dst-hosts",
+                 "f-svc", "f-proto",
                  "f-limit", "f-state",
                  "f-time", "f-recent", "f-mac", "f-rpfilter",
                  "f-string", "f-owner", "f-frag", "f-action",
