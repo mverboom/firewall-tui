@@ -1343,6 +1343,170 @@ class StatePicker(ModalScreen):
             self.dismiss(None)
 
 
+class ServiceEditor(ModalScreen):
+    """Structured editor for a db [services] entry: a name plus either a
+    port/range + protocol, or an ICMP type. The assembled value is stored as
+    '<port>/<proto>', '<range>/<proto>', 'icmp' or 'icmp/<type>'. F1 shows
+    per-field context help."""
+
+    CSS = """
+    ServiceEditor #db-error { color: $error; }
+    ServiceEditor .portrow, ServiceEditor .icmprow { display: none; }
+    ServiceEditor .portrow.-show, ServiceEditor .icmprow.-show { display: block; }
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("ctrl+s", "save", "Save"),
+        Binding("s", "save", "Save", show=False),
+        Binding("f1", "app.help", "Help", show=False),
+        Binding("up", "prev_field", "Prev field", show=False),
+        Binding("down", "next_field", "Next field", show=False),
+    ]
+
+    FIELD_HELP = {
+        "db-key": "The service name, used as dservice(name) in rules.",
+        "db-proto": "The IP protocol: tcp, udp, or icmp.",
+        "db-port": "The port number or range (--dport), e.g. 22 or 1000:2000.",
+        "db-icmp": "Optional ICMP type, e.g. echo-request (icmp/<type>).",
+    }
+
+    FIELD_IDS = ("db-key", "db-proto", "db-port", "db-icmp")
+
+    def __init__(self, key: str = "", value: str = "",
+                 orig: "parser.DbLine | None" = None) -> None:
+        super().__init__()
+        self.key = key
+        self.value = value
+        self.orig = orig
+
+    def _row(self, label: str, widget, classes: str = "") -> Horizontal:
+        return Horizontal(Label(label, classes="flabel"), widget,
+                          classes=f"frow {classes}".strip())
+
+    def compose(self) -> ComposeResult:
+        verb = "Edit" if self.orig else "New"
+        yield Static(f"{verb} service", classes="modal-title")
+        yield self._row("Name", Input(self.key, id="db-key",
+                        classes="finput -textual-compact"))
+        yield self._row("Protocol", NavSelect(
+            [("tcp", "tcp"), ("udp", "udp"), ("icmp", "icmp")],
+            value="tcp", id="db-proto",
+            classes="fselect -textual-compact", allow_blank=False))
+        yield self._row("Port/range", Input(
+            "", id="db-port", placeholder="e.g. 22 or 1000:2000",
+            classes="finput -textual-compact"), classes="portrow")
+        yield self._row("ICMP type", Input(
+            "", id="db-icmp", placeholder="e.g. echo-request (optional)",
+            classes="finput -textual-compact"), classes="icmprow")
+        yield Static("", id="db-error", classes="dberror")
+        with Horizontal(id="modal-buttons"):
+            yield Button("Save", variant="primary", id="btn-save")
+            yield Button("Cancel", id="btn-cancel")
+
+    def _update_rows(self) -> None:
+        """Show the port or the ICMP-type row depending on the protocol."""
+        proto = self.query_one("#db-proto", Select).value
+        self.query_one(".portrow").set_class(proto in ("tcp", "udp"),
+                                              "-show")
+        self.query_one(".icmprow").set_class(proto == "icmp", "-show")
+
+    def on_mount(self) -> None:
+        for w in self.query(".finput"):
+            w.add_class("-textual-compact")
+        v = self.value
+        if v == "icmp":
+            proto, port, icmp = "icmp", "", ""
+        elif v.startswith("icmp/"):
+            proto, port, icmp = "icmp", "", v.split("/", 1)[1]
+        elif "/" in v:
+            port, proto = v.split("/", 1)
+            icmp = ""
+        else:
+            proto, port, icmp = "tcp", v, ""
+        self.query_one("#db-proto", Select).value = proto
+        self.query_one("#db-port", Input).value = port
+        self.query_one("#db-icmp", Input).value = icmp
+        self._update_rows()
+        self.query_one("#db-key").focus()
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "db-proto":
+            self._update_rows()
+
+    def _value(self) -> str:
+        proto = self.query_one("#db-proto", Select).value
+        if proto == "icmp":
+            icmp = self.query_one("#db-icmp", Input).value.strip()
+            return f"icmp/{icmp}" if icmp else "icmp"
+        port = self.query_one("#db-port", Input).value.strip()
+        return f"{port}/{proto}"
+
+    def _validate(self, key: str, value: str) -> list[str]:
+        return self.app._validate_db_entry("services", key, value,
+                                           orig=self.orig)
+
+    def action_save(self) -> None:
+        key = self.query_one("#db-key", Input).value.strip()
+        value = self._value()
+        errs = self._validate(key, value)
+        if errs:
+            self.query_one("#db-error", Static).update(escape("\n".join(errs)))
+            return
+        self.dismiss({"key": key, "value": value})
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-save":
+            self.action_save()
+        elif event.button.id == "btn-cancel":
+            self.action_cancel()
+
+    def _fields(self) -> list:
+        return [self.query_one(f"#{wid}") for wid in self.FIELD_IDS
+                if self.query_one(f"#{wid}").display]
+
+    def action_next_field(self) -> None:
+        fields = self._fields()
+        if not fields:
+            return
+        cur = self.focused
+        if cur in fields:
+            fields[(fields.index(cur) + 1) % len(fields)].focus()
+        else:
+            fields[0].focus()
+
+    def action_prev_field(self) -> None:
+        fields = self._fields()
+        if not fields:
+            return
+        cur = self.focused
+        if cur in fields:
+            fields[(fields.index(cur) - 1) % len(fields)].focus()
+        else:
+            fields[-1].focus()
+
+    def focused_field_help(self) -> tuple[str, str] | None:
+        f = self.focused
+        if f is None:
+            return None
+        label = None
+        for row in self.query(".frow"):
+            try:
+                lab = row.query_one(".flabel")
+            except NoMatches:
+                continue
+            if row.query(f"#{f.id}"):
+                label = str(lab.content)
+                break
+        desc = self.FIELD_HELP.get(f.id)
+        if desc is None:
+            return None
+        return (label or f.id, desc)
+
+
 class DbEntryEditor(ModalScreen):
     """Add/edit a db entry with separate name and value fields.
 
@@ -2500,10 +2664,13 @@ class FirewallApp(App):
                               source: str | None = None) -> bool:
         """Insert new_line after the last line of `kind` in the section
         named section_name (optionally matching source). Returns True when
-        the section was found and the line inserted."""
+        the section was found and the line inserted. Works for both rules
+        lines (section in .name) and db lines (section in .section)."""
         for i, l in enumerate(lines):
-            if (l.kind == "section" and l.name == section_name
-                    and (source is None or l.source == source)):
+            name = getattr(l, "name", None) or getattr(l, "section", "")
+            if (l.kind == "section" and name == section_name
+                    and (source is None
+                         or getattr(l, "source", None) == source)):
                 j = i
                 while j + 1 < len(lines) and lines[j + 1].kind == kind:
                     j += 1
@@ -2727,8 +2894,8 @@ class FirewallApp(App):
         current context), plus, in the rule editor, a description of the
         currently-focused field."""
         groups: list[tuple[str, list[tuple[str, str]]]] = []
-        # in the rule editor, lead with the focused field's context help
-        if isinstance(self.screen, RuleEditor):
+        # in a form editor, lead with the focused field's context help
+        if hasattr(self.screen, "focused_field_help"):
             fh = self.screen.focused_field_help()
             if fh:
                 groups.append((f"Field: {fh[0]}", [(fh[0], fh[1])]))
@@ -3441,7 +3608,9 @@ class FirewallApp(App):
             self.notify("db file has no sections", severity="warning")
             return
         self.current_dbsection = section
-        self.push_screen(DbEntryEditor(section), self._on_db_entry)
+        editor = (ServiceEditor() if section == "services"
+                  else DbEntryEditor(section))
+        self.push_screen(editor, self._on_db_entry)
 
     def _on_db_entry(self, result) -> None:
         if not result:
@@ -3474,8 +3643,13 @@ class FirewallApp(App):
             self.notify("Select a db entry to edit", severity="warning")
             return
         e = self.dblines[info[4]]
+        if e.section == "services":
+            editor = ServiceEditor(key=e.key, value=e.value, orig=e)
+        else:
+            editor = DbEntryEditor(e.section, key=e.key, value=e.value,
+                                   orig=e)
         self.push_screen(
-            DbEntryEditor(e.section, key=e.key, value=e.value, orig=e),
+            editor,
             lambda res, old=e: self._on_db_entry_edit(old, res))
 
     def _on_db_entry_edit(self, old, result) -> None:
