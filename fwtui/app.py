@@ -371,7 +371,7 @@ class RuleEditor(ModalScreen):
         "f-chain": "The chain to add the rule to (INPUT, FORWARD, OUTPUT, "
                    "PREROUTING, POSTROUTING).",
         "f-iface": "The network interface on the firewall the rule applies "
-                    "to (-i/-o), e.g. eth0, vlan10.",
+                    "to, e.g. eth0, vlan10.",
         "f-iface-dir": "Interface direction: -i (input) or -o (output). "
                         "Only shown for FORWARD, where both apply.",
         "f-src": "Source address: a host, hostgroup, network, networkgroup, "
@@ -649,8 +649,8 @@ class RuleEditor(ModalScreen):
                     self._chains(), id="f-chain",
                     classes="fselect -textual-compact", allow_blank=False))
                 yield self._row("Interface", Horizontal(
-                    NavSelect([("-i", "-i"), ("-o", "-o")], value="-i",
-                              id="f-iface-dir",
+                    NavSelect([("input", "-i"), ("output", "-o")],
+                              value="-i", id="f-iface-dir",
                               classes="fselect iface-dir -textual-compact",
                               allow_blank=False),
                     (NavSelect(self._iface_options(), value="", id="f-iface",
