@@ -29,8 +29,8 @@ class DbView(ScrollView):
     """Collapsible grouped view of the db file."""
 
     BINDINGS = NAV_BINDINGS + [
-        Binding("c", "collapse_all", "Collapse all", show=False),
-        Binding("o", "expand_all", "Expand all", show=False),
+        Binding("c", "collapse_all", "Collapse all"),
+        Binding("o", "expand_all", "Expand all"),
     ]
 
     class SelectionChanged(Message):

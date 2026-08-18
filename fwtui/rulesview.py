@@ -59,8 +59,8 @@ class RulesView(ScrollView):
     """Full-width rules view with spanning section bars."""
 
     BINDINGS = NAV_BINDINGS + [
-        Binding("o", "toggle_all", "Toggle all", show=False),
-        Binding("O", "toggle_empty", "Toggle empty", show=False),
+        Binding("o", "toggle_all", "Toggle all"),
+        Binding("O", "toggle_empty", "Show/hide empty"),
         Binding("ctrl+up", "move_up", "Move up", show=False),
         Binding("ctrl+down", "move_down", "Move down", show=False),
     ]

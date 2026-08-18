@@ -1874,7 +1874,6 @@ class FirewallApp(App):
     DataTable { height: 1fr; }
     #rules-header, #nat-header, #mangle-header { height: 1; text-style: bold; background: $panel; }
     #rules-view, #nat-view, #mangle-view { height: 1fr; }
-    #statusbar { height: 1; background: $panel; color: $text; padding: 0 1; }
     /* slim line buttons everywhere (borderless text buttons, 1 line tall) */
     Button {
         border: none;
@@ -1991,7 +1990,6 @@ class FirewallApp(App):
                     yield NavDataTable(id="global-table", zebra_stripes=True,
                                        cursor_type="row")
             yield DbView(id="db-view")
-        yield Static("", id="statusbar")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -2017,7 +2015,7 @@ class FirewallApp(App):
             sel.value = self.hosts[0]
             self._load_ruleset(self.hosts[0])
         self._populate_db()
-        self._update_status()
+        self.refresh_bindings()
         self.rules_view.focus()
 
     def _load_hosts(self) -> None:
@@ -2104,7 +2102,7 @@ class FirewallApp(App):
         self.dirty = False
         self._populate_rules(reset_collapsed=True)
         self._populate_global()
-        self._update_status()
+        self.refresh_bindings()
 
     # -- table population ---------------------------------------------------
     def _populate_rules(self, reset_collapsed: bool = False) -> None:
@@ -2236,6 +2234,11 @@ class FirewallApp(App):
             self.db_view.focus()
         elif refocus:
             self._focus_tabs()
+        self.refresh_bindings()
+
+    def on_tabbed_content_tab_activated(self, event) -> None:
+        """Refresh the Footer keys when the active tab changes."""
+        self.refresh_bindings()
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "host-select":
@@ -2255,6 +2258,7 @@ class FirewallApp(App):
         self._set_db_mode(False)
         self._load_ruleset(host)
         self.query_one("#tabs", TabbedContent).active = "tab-rules"
+        self.refresh_bindings()
 
     def _on_switch_confirm(self, result) -> None:
         if result:
@@ -2444,7 +2448,6 @@ class FirewallApp(App):
                 view = self._active_rules_view()
                 if view:
                     view.set_filter("")
-        self._update_status()
         self._focus_content()
 
     def on_input_changed(self, event: Input.Changed) -> None:
@@ -2457,7 +2460,6 @@ class FirewallApp(App):
                 view = self._active_rules_view()
                 if view:
                     view.set_filter(event.value)
-            self._update_status()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Enter in the filter bar: close it, keep the filter."""
@@ -2832,6 +2834,7 @@ class FirewallApp(App):
                                 copy.deepcopy(self.dblines)))
         if len(self.undo_stack) > 50:
             self.undo_stack.pop(0)
+        self.refresh_bindings()
 
     def action_undo(self) -> None:
         """ctrl+z: restore the last snapshot."""
@@ -2844,6 +2847,7 @@ class FirewallApp(App):
         self._populate_rules()
         self._populate_global()
         self._populate_db()
+        self.refresh_bindings()
 
     def on_rules_view_move_request(self, event) -> None:
         """ctrl+up/down: move the selected rule or section."""
@@ -3502,7 +3506,7 @@ class FirewallApp(App):
             self.dirty = True
         self._populate_rules()
         self._populate_global()
-        self._update_status()
+        self.refresh_bindings()
         label = (result["commit"] if result["commit"] == "working tree"
                  else result["commit"][:8])
         self.notify(f"Loaded {label} - review and save (ctrl+s)")
@@ -3536,11 +3540,72 @@ class FirewallApp(App):
 
     def check_action(self, action: str,
                      parameters: tuple[object, ...]) -> bool | None:
-        """Hide the git action (and its footer key) when the firewall dir
-        is not inside a git repo."""
+        """Dynamic key availability: returning True shows a key in the Footer
+        (and lets it run), False hides it entirely and makes it a no-op, and
+        None shows it dimmed. Availability depends on the active tab, whether
+        the shared db view is open, whether a host is selected, and git state."""
+        if action == "quit":
+            return True
+        if action == "undo":
+            return bool(self.undo_stack)
+        if action == "save":
+            return self.db_mode or self.current_host is not None
+        if action in ("validate", "preview", "deploy"):
+            return self.current_host is not None
         if action == "git":
-            return self._git_available()
+            return self._git_available() and self.current_host is not None
+        if self.db_mode:
+            # shared db view: add/edit/delete/where-used operate on db entries
+            rk, info = self._selected_row()
+            kind = info[0] if info else None
+            if action == "add":
+                return True
+            if action == "edit":
+                return kind in ("dbsection", "dbentry")
+            if action in ("delete", "where_used"):
+                return kind == "dbentry"
+            return False  # rules-tab actions (n, add-rule) don't apply here
+        if self._active_tab() == "global":
+            # global settings: only 'e' (edit) applies; a/d/w/n do nothing
+            return action == "edit"
+        # rules / nat / mangle tabs
+        rk, info = self._selected_row()
+        kind = info[0] if info else None
+        if action == "edit":
+            return kind in ("section", "rule", "include")
+        if action == "delete":
+            return kind in ("section", "rule", "include")
+        if action == "where_used":
+            return kind == "rule"
+        if action == "new_section":
+            return True
+        if action == "add":
+            return self._can_add_rule()
+        if action == "focus_tabs":
+            return True
         return super().check_action(action, parameters)
+
+    def _can_add_rule(self) -> bool:
+        """True when 'a' has a real section to add to: a rule/section/include
+        is selected, or a real section is visible in the active tab."""
+        rk, info = self._selected_row()
+        if info and info[0] in ("rule", "section", "include"):
+            return True
+        view = self._active_rules_view()
+        if view:
+            for row in view.rows:
+                if row[0] == "section":
+                    return True
+        return False
+
+    def on_rules_view_selection_changed(self, event) -> None:
+        """Selection changed in a rules view: refresh which Footer keys are
+        available (add/edit/delete/where-used depend on the selected row)."""
+        self.refresh_bindings()
+
+    def on_db_view_selection_changed(self, event) -> None:
+        """Selection changed in the db view: refresh the Footer keys."""
+        self.refresh_bindings()
 
     def _offer_commit(self, paths: list[str]) -> None:
         """After a save, offer an optional git commit for the changed files
@@ -3559,7 +3624,6 @@ class FirewallApp(App):
             with open(self.db_path, "w") as fh:
                 fh.write(parser.serialize_db(self.dblines))
             self.dirty = False
-            self._update_status()
             self.notify(f"Saved {os.path.basename(self.db_path)}")
             self._offer_commit([self.db_path])
             return
@@ -3571,45 +3635,9 @@ class FirewallApp(App):
             with open(path, "w") as fh:
                 fh.write(parser.serialize_rules(flines))
         self.dirty = False
-        self._update_status()
         saved = ", ".join(os.path.basename(p) for p in by_file)
         self.notify(f"Saved {saved}")
         self._offer_commit(list(by_file))
-
-    def _update_status(self) -> None:
-        sb = self.query_one("#statusbar", Static)
-        filt = ""
-        view = self._active_rules_view()
-        if view and view.filter_text:
-            filt = f"  [filter: {view.filter_text}]"
-        if self.db_view and self.db_view.filter_text:
-            filt += f"  [db filter: {self.db_view.filter_text}]"
-        empty_hint = "O=show empty"
-        if view is not None and not view.hide_empty:
-            empty_hint = "O=hide empty"
-        git_hint = "g=git " if self._git_available() else ""
-        sb.update(
-            f"a=add e=edit d=delete w=where used n=new section "
-            f"space=collapse o=toggle all "
-            f"{empty_hint} enter=edit v=validate p=preview D=deploy {git_hint}"
-            f"/=filter ctrl+z=undo ctrl+s=save q=quit   esc=menu{filt}")
-
-    def on_rules_view_selection_changed(self, event) -> None:
-        """Show the raw rule text of the selected rule in the status bar."""
-        if self._active_tab() not in ("rules", "nat", "mangle"):
-            return
-        view = self._active_rules_view()
-        if not view:
-            return
-        rows = view.rows
-        if event.row_index < len(rows):
-            info = rows[event.row_index]
-            if info[0] == "rule":
-                line = info[1]
-                self.query_one("#statusbar", Static).update(
-                    f"{line.table}{line.proto}={line.value}")
-                return
-        self._update_status()
 
     def on_rules_view_widths_changed(self, event) -> None:
         """Column widths changed: keep the header line of that view in sync."""

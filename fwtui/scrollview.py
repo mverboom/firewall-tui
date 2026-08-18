@@ -29,9 +29,9 @@ NAV_BINDINGS = [
     Binding("ctrl+u", "move_half_page(-1)", "Half page up", show=False),
     Binding("ctrl+f", "move_page(1)", "Page down", show=False),
     Binding("ctrl+b", "move_page(-1)", "Page up", show=False),
-    Binding("space", "toggle_collapse", "Collapse/expand", show=False),
-    Binding("enter", "activate", "Edit", show=False),
-    Binding("/", "search", "Filter", show=False),
+    Binding("space", "toggle_collapse", "Collapse/expand"),
+    Binding("enter", "activate", "Edit"),
+    Binding("/", "search", "Filter"),
 ]
 
 
