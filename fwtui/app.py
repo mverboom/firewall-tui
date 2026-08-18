@@ -2774,8 +2774,8 @@ class FirewallApp(App):
     .src-val, .src-custom { width: 1fr; }
     #rawcol TextArea { height: 1fr; }
     #modal-buttons { height: 2; align-horizontal: left; align-vertical: middle; padding: 0 1; }
-    #modal-buttons Button { margin: 0 1 0 0; border: heavy $primary; text-style: reverse; }
-    .picker-add { margin: 0 1; border: heavy $primary; text-style: reverse; }
+    #modal-buttons Button { margin: 0 1 0 0; border: heavy $primary; color: white; }
+    .picker-add { margin: 0 1; border: heavy $primary; color: white; }
     .modal-title { padding: 1; text-style: bold; }
     #report { height: 20; }
     """
