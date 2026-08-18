@@ -1691,8 +1691,14 @@ class ListPicker(ModalScreen):
 
     def compose(self) -> ComposeResult:
         yield Static(self.title, classes="modal-title")
+        # include any current values that aren't in the option list (custom
+        # entries like DNS hostnames) so they show up and stay selected
+        all_options = list(self.options)
+        for v in self.current:
+            if v not in all_options:
+                all_options.append(v)
         yield SelectionList(
-            *((o, o, o in self.current) for o in self.options),
+            *((o, o, o in self.current) for o in all_options),
             id="list-picker")
         if self.allow_custom:
             yield Button("Add custom...", id="btn-custom",
@@ -2768,8 +2774,8 @@ class FirewallApp(App):
     .src-val, .src-custom { width: 1fr; }
     #rawcol TextArea { height: 1fr; }
     #modal-buttons { height: 2; align-horizontal: left; align-vertical: middle; padding: 0 1; }
-    #modal-buttons Button { margin: 0 1 0 0; }
-    .picker-add { margin: 0 1; }
+    #modal-buttons Button { margin: 0 1 0 0; border: tall $primary; background: $panel; }
+    .picker-add { margin: 0 1; border: tall $primary; background: $panel; }
     .modal-title { padding: 1; text-style: bold; }
     #report { height: 20; }
     """
