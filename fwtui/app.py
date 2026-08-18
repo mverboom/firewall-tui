@@ -1314,7 +1314,7 @@ class StatePicker(ModalScreen):
     def compose(self) -> ComposeResult:
         yield Static("Connection states", classes="modal-title")
         yield SelectionList(
-            *((s, s in self.current) for s in STATE_OPTIONS),
+            *((s, s, s in self.current) for s in STATE_OPTIONS),
             id="state-list")
         with Horizontal(id="modal-buttons"):
             yield Button("OK", variant="primary", id="btn-ok")
