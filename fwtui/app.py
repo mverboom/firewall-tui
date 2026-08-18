@@ -2468,9 +2468,14 @@ class FirewallApp(App):
         everywhere: list[tuple[str, str]] = []
         context: list[tuple[str, str]] = []
         for _key, (_ns, binding, enabled, _tooltip) in self.active_bindings.items():
-            if binding.show and binding.description and enabled:
-                item = (self.get_key_display(binding), binding.description)
-                (everywhere if binding.action in universal else context).append(item)
+            # enter/activate is an obvious UI affordance (also it toggles
+            # collapse on sections, unlike 'e'); show it in the footer but
+            # leave it out of the help listing to avoid the 'Edit' confusion
+            if (binding.action == "activate"
+                    or not (binding.show and binding.description and enabled)):
+                continue
+            item = (self.get_key_display(binding), binding.description)
+            (everywhere if binding.action in universal else context).append(item)
         groups: list[tuple[str, list[tuple[str, str]]]] = []
         if everywhere:
             groups.append(("Everywhere", sorted(everywhere)))
