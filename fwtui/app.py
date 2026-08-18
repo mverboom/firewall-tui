@@ -352,6 +352,9 @@ class RuleEditor(ModalScreen):
         Binding("w", "where_used", "Where used", show=False),
         Binding("up", "prev_field", "Prev field", show=False),
         Binding("down", "next_field", "Next field", show=False),
+        # F1 context help (the app-level binding is not reachable while this
+        # modal is open, so bind it here too, namespaced to the app action)
+        Binding("f1", "app.help", "Help", show=False),
     ]
 
     # Per-field context help, shown by F1 (the help key) for the focused
