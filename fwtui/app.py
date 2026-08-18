@@ -2217,7 +2217,7 @@ class FirewallApp(App):
         Binding("ctrl+s", "save", "Save"),
         Binding("f1", "help", "Help"),
         Binding("q", "quit", "Quit"),
-        Binding("escape", "focus_tabs", "Back to tabs", show=False),
+        Binding("escape", "quit", "Quit", show=False),
     ]
 
     def __init__(self, host: str | None = None,
